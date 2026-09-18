@@ -1,0 +1,53 @@
+name: Build & Release
+
+# 推 tag（形如 v0.1.0）时自动构建三个平台的可执行文件，并发布到 GitHub Release。
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        - os: macos-latest
+          target: aarch64-apple-darwin
+          asset: type-text-macos
+        - os: ubuntu-latest
+          target: x86_64-unknown-linux-musl
+          asset: type-text-linux
+        - os: windows-latest
+          target: x86_64-pc-windows-msvc
+          asset: type-text-windows.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare asset
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp "target/${{ matrix.target }}/release/type-text.exe" "${{ matrix.asset }}"
+          else
+            cp "target/${{ matrix.target }}/release/type-text" "${{ matrix.asset }}"
+          fi
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}
+          token: ${{ secrets.GITHUB_TOKEN }}
