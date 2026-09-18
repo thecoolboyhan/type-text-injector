@@ -1,0 +1,13 @@
+[package]
+name = "type-text-injector"
+version = "0.1.0"
+edition = "2021"
+description = "把本机文本模拟键盘输入到当前光标处（含虚拟机/远程桌面），macOS 专用，keycode 级注入"
+license = "MIT"
+repository = "https://github.com/thecoolboyhan/type-text-injector"
+keywords = ["keyboard", "automation", "macos", "applescript", "clipboard"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "type-text"
+path = "src/main.rs"
