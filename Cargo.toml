@@ -1,0 +1,30 @@
+[package]
+name = "type-text-injector"
+version = "0.1.0"
+edition = "2021"
+description = "把本机文本模拟键盘输入到当前光标处（含虚拟机/远程桌面），跨平台：macOS / Linux / Windows"
+license = "MIT"
+repository = "https://github.com/thecoolboyhan/type-text-injector"
+keywords = ["keyboard", "automation", "macos", "linux", "windows", "xdotool", "applescript", "clipboard"]
+categories = ["command-line-utilities"]
+
+# 核心库：CLI (main.rs) 与 GUI (gui.rs) 共用注入后端
+[lib]
+name = "type_text_injector"
+path = "src/lib.rs"
+
+[[bin]]
+name = "type-text"
+path = "src/main.rs"
+
+# 仅 Windows 需要 enigo（Win32 SendInput）；macOS/Linux 走系统自带命令，无编译依赖。
+[target.'cfg(target_os = "windows")'.dependencies]
+enigo = "0.6"
+
+# GUI 依赖（eframe + rfd 文件对话框）：
+# 只对「非 musl」目标启用 —— macOS / Windows / linux-gnu 原生构建自动带 GUI；
+# Linux musl 静态交叉编译（.cargo/config.toml）自动跳过 GUI，
+# 保持纯 CLI、无系统 GL/X11 库依赖，静态链接不被破坏。
+[target.'cfg(not(target_env = "musl"))'.dependencies]
+eframe = "0.36"
+rfd = "0.17"

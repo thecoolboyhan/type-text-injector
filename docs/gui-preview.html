@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Hiragino Sans GB", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #F6F8FB;
+    padding: 24px;
+    width: 640px;
+    color: #1F2124;
+  }
+  /* 窗口卡片模拟 */
+  .window {
+    background: #F6F8FB;
+    border: 1px solid #E0E6EF;
+    border-radius: 12px;
+    padding: 16px;
+  }
+  /* App Bar */
+  .appbar {
+    background: #1A73E8;
+    border-radius: 16px;
+    padding: 14px 20px;
+    margin-bottom: 12px;
+  }
+  .appbar .title { color: #fff; font-size: 22px; font-weight: 700; }
+  .appbar .title .en { color: #fff; }
+  .appbar .sub { color: rgba(255,255,255,.68); font-size: 12px; margin-top: 2px; }
+  /* 卡片 */
+  .card {
+    background: #fff;
+    border: 1px solid #ECEFF4;
+    border-radius: 16px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+  }
+  .card .label {
+    font-size: 13px; color: #5F6368; font-weight: 600; margin-bottom: 8px;
+  }
+  .params { display: flex; align-items: center; gap: 8px; }
+  .field {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid #D0D5DD; border-radius: 14px;
+    padding: 6px 12px; font-size: 14px; color: #1F2124;
+  }
+  .field .val { color: #1A73E8; font-weight: 700; }
+  .hint { font-size: 11px; color: #9AA0A6; margin-left: 8px; }
+  /* 按钮行 */
+  .btnrow { display: flex; justify-content: space-between; margin-bottom: 12px; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 20px; font-size: 14px; font-weight: 500;
+    padding: 10px 20px; height: 40px; border: 1px solid #D0D5DD;
+    background: #fff; color: #1F2124;
+  }
+  .btn.primary {
+    background: #1A73E8; color: #fff; border: none;
+    border-radius: 26px; padding: 10px 32px; height: 44px; font-weight: 700; font-size: 15px;
+  }
+  /* 文本卡片 */
+  .texthead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .texthead .count { font-size: 12px; color: #5F6368; }
+  .textarea {
+    border: 1px solid #D0D5DD; border-radius: 14px;
+    padding: 12px; font-family: Menlo, Monaco, monospace; font-size: 14px;
+    color: #1F2124; height: 240px; background: #fff;
+    line-height: 1.6; white-space: pre-wrap;
+  }
+  /* 状态区 */
+  .status { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #188038; }
+  .status-text { font-size: 13px; color: #188038; }
+</style>
+</head>
+<body>
+<div class="window">
+  <!-- App Bar -->
+  <div class="appbar">
+    <div class="title"><span class="en">TypeText</span> 文本注入器</div>
+    <div class="sub">把文本模拟键盘输入到虚拟机 / 远程桌面</div>
+  </div>
+
+  <!-- 参数卡片 -->
+  <div class="card">
+    <div class="label">参数设置</div>
+    <div class="params">
+      <span class="field">倒计时 <span class="val">5</span> 秒</span>
+      <span class="field">每键间隔 <span class="val">50</span> ms</span>
+      <span class="hint">（虚拟机丢字就调大间隔）</span>
+    </div>
+  </div>
+
+  <!-- 按钮行 -->
+  <div class="btnrow">
+    <div>
+      <span class="btn">📄 从文件…</span>
+      <span class="btn">🔍 预览</span>
+    </div>
+    <span class="btn primary">开始输入</span>
+  </div>
+
+  <!-- 文本卡片 -->
+  <div class="card">
+    <div class="texthead">
+      <span class="label" style="margin:0">要注入的文本</span>
+      <span class="count">12 字符 / 1 行</span>
+    </div>
+    <div class="textarea">Hello VM!
+This is a demo text.</div>
+    <div class="status">
+      <span class="dot"></span>
+      <span class="status-text">就绪。点「开始输入」后 5 秒自动注入</span>
+    </div>
+  </div>
+</div>
+</body>
+</html>
