@@ -1,6 +1,7 @@
 /target
 target*
 **/*.rs.bk
+.DS_Store
 # 废弃的 Java Swing 版（已由 Rust egui 版取代，本地保留历史）
 /gui
 # 本地 Hermes 验证配方，不进仓库

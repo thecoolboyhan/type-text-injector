@@ -9,7 +9,7 @@
 //!   ./type-text 5 80             # 准备 5 秒，每键 80ms（虚拟机丢字就调大这个）
 //!   ./type-text -n               # 只预览不注入
 //!   ./type-text -p               # 自检
-//!   ./type-text --gui            # 打开可视化界面（macOS/Windows 原生构建）
+//!   ./type-text --gui            # 打开可视化界面（macOS / Linux 原生构建；Windows 版为纯 CLI）
 //!
 //! 编译：cargo build --release    （产物 target/release/type-text）
 
@@ -19,17 +19,17 @@ use type_text_injector::{countdown, platform, read_text};
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
 
-    // GUI 入口：只有非 musl 构建（macOS/Windows/linux-gnu）带 GUI 模块；
-    // musl 静态交叉版是纯 CLI，给出明确提示。
+    // GUI 入口：只有「非 musl 且非 Windows」构建带 GUI 模块（与 Cargo.toml / lib.rs 门控一致）；
+    // Linux musl 静态交叉版与 Windows 版是纯 CLI，给出明确提示。
     if args.iter().any(|a| a == "--gui") {
-        #[cfg(not(target_env = "musl"))]
+        #[cfg(all(not(target_env = "musl"), not(target_os = "windows")))]
         {
             type_text_injector::gui::run();
             return;
         }
-        #[cfg(target_env = "musl")]
+        #[cfg(any(target_env = "musl", target_os = "windows"))]
         {
-            eprintln!("此构建（Linux musl 静态版）不含 GUI，请用 macOS / Windows 原生构建。");
+            eprintln!("此构建（Linux musl 静态版 / Windows 版）不含 GUI，请用 macOS 原生构建。");
             std::process::exit(1);
         }
     }
