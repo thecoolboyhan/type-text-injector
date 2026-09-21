@@ -33,11 +33,11 @@ cargo build --release
 
 ## 支持平台
 
-| 平台 | 注入后端 | 前置依赖 |
-|---|---|---|
-| macOS | `osascript` keycode（最稳，能进虚拟机） | 系统自带；需授予「辅助功能」权限 |
-| Linux | `xdotool`（逐字 type / key） | 需安装 `xdotool`（如 `apt install xdotool`） |
-| Windows | `enigo`（Win32 SendInput） | 自动包含，无需额外依赖 |
+| 平台 | 注入后端 | 前置依赖 | GUI |
+|---|---|---|---|
+| macOS | `osascript` keycode（最稳，能进虚拟机） | 系统自带；需授予「辅助功能」权限 | ✅ |
+| Linux | `xdotool`（逐字 type / key） | 需安装 `xdotool`（如 `apt install xdotool`） | ✅（X11；Wayland 需 ydotool） |
+| Windows | `enigo`（Win32 SendInput） | 自动包含，无需额外依赖 | ✅（glow/OpenGL 后端） |
 
 Release 页提供三个平台编译好的可执行文件，开箱即用（Windows 版需本机有 VC++ 运行库，一般已自带）。
 
@@ -107,7 +107,7 @@ rustc -O src/main.rs -o type-text
 
 ```
 $ ./type-text
-请输入要输入的文本，输入完后按回车，再按 Ctrl-D 结束：
+请输入要输入的文本，输入完后按回车，再按 Ctrl-D 结束：  （Windows：Ctrl-Z 或 Ctrl-D）
 （粘贴你的文本）
 ^D
 已收到 25 行 / 1240 字符，每键间隔 50ms，预计耗时约 66 秒；5 秒后开始输入。
@@ -116,7 +116,7 @@ $ ./type-text
 完成，共输入 1240 个键。
 ```
 
-> 终端里结束输入：先按一次回车，再按 **Ctrl-D**（若没反应，再按一次）。
+> 终端里结束输入：先按一次回车，再按 **Ctrl-D**（Windows 用 **Ctrl-Z** 或 Ctrl-D；若没反应，再按一次）。
 
 ### 管道 / 重定向
 

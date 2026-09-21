@@ -15,6 +15,7 @@
 - 只支持 **英文 / 数字 / 标点**（US ANSI 键位）。非 ASCII（含中文）会被自动跳过并在结尾提示。
 - 三个平台都只做**键盘模拟**，不经过剪贴板、不动鼠标。
 - 单条命令、零交互主流程：`启动 → 读文本(EOF/Ctrl-D) → 倒计时 → 逐键注入 → 完成`。
+- GUI 模式（`--gui`）提供可视化界面，同进程调用注入逻辑，不 spawn 子进程。
 
 ---
 
@@ -32,7 +33,7 @@
 
 **因此**：macOS 后端**全部用 `key code N`**（真实虚拟键码 + Shift 标志），这是它能稳定打进 Parallels / VMware 的原因。Linux / Windows 走各自平台的原生键事件（xdotool / Win32 SendInput），同样可靠。
 
-> ⚠️ 任何「改回整段 `keystroke`」的“简化”都会让虚拟机场景重新崩掉。这是本项目存在的全部理由，不要回归。
+> ⚠️ 任何「改回整段 `keystroke`」的"简化"都会让虚拟机场景重新崩掉。这是本项目存在的全部理由，不要回归。
 
 **次要坑（虚拟机仍可能零星丢字）**：keycode 级注入能进虚拟机，但字符仍可能被目标键盘缓冲 / HID 队列丢弃。唯一有效手段是**拉大每键间隔**（默认 50ms，丢字就 80/120/200ms 逐档加）。代价 = 字符数 × 间隔，开工前必须打印预计耗时。
 
@@ -44,8 +45,10 @@
 
 ```
 type-text-injector/
-├── src/main.rs            # 全部逻辑（约 320 行）
-├── Cargo.toml            # 二进制名 type-text；仅 Windows 依赖 enigo
+├── src/lib.rs            # 核心库：读文本、倒计时、平台注入后端、纯函数解析
+├── src/main.rs           # CLI 入口（约 106 行）：参数解析 → 调用 lib
+├── src/gui.rs            # GUI（egui/eframe，Material You 风格，CJK 字体）
+├── Cargo.toml            # 依赖门控：GUI 仅非 musl 构建；Windows 用 glow 后端
 ├── .cargo/config.toml    # macOS→Linux musl 静态交叉编译配置
 ├── .github/workflows/release.yml   # 推 v* tag 时构建三平台并发布 Release
 ├── README.md             # 面向人类的使用说明（中文）
@@ -54,13 +57,25 @@ type-text-injector/
 └── .gitignore
 ```
 
-### `src/main.rs` 结构
-- `read_text()`：读 stdin → 统一 CRLF/CR→LF → trim 末尾空行。用 `std::io::IsTerminal` 判断交互模式（交互才打印输入提示）。
-- `countdown(secs)`：逐秒倒计时，提示用户把光标点到目标窗口。
+### `src/lib.rs` 结构
+- `read_text()`：手动 1024 字节循环读 stdin → 统一 CRLF/CR→LF → trim 末尾空行。
+  - **Windows 特殊处理**：显式检测字节 `0x04`（Ctrl-D）作为 EOF（Windows C 运行时原生只认 Ctrl-Z `0x1A`）。
+  - 交互终端下打印提示（Windows 提示"Ctrl-Z（或 Ctrl-D）"，其他平台仅"Ctrl-D"）。
+- `countdown(secs)`：逐秒倒计时，提示用户把光标点到目标窗口。`secs == 0` 立即返回。
+- `is_injectable(c)` / `analyze(text, delay_ms)`：纯函数，分析文本注入计划（不注入），GUI 预览与 CLI 共用。
 - `mod platform`：**用 `#[cfg(target_os = "...")]` 编译期分三个后端**，每个暴露统一接口：
   - `inject(text: &str, delay_ms: u64) -> Result<(usize, Vec<char>), String>`：返回 `(注入键数, 被跳过的非 ASCII 字符)`。
   - `probe(secs, delay_ms)`：自检，打一行标记确认注入生效。
-- `main()`：解析参数 → 决定 dry-run / probe / 正常注入。
+- `mod gui`：**用 `#[cfg(not(target_env = "musl"))]` 门控**，非 musl 构建（macOS / Linux / Windows）自动包含 GUI。
+
+### `src/main.rs` 结构（仅 CLI 入口，约 106 行）
+- `main()`：解析参数 → 决定 `--gui` / dry-run / probe / 正常注入。
+- `--gui` 入口同样用 `#[cfg(not(target_env = "musl"))]` 门控，musl 构建给出明确提示。
+
+### `src/gui.rs`（约 30KB）
+- egui/eframe + Material You 风格配色 + CJK 字体回退。
+- 文本框输入/粘贴/从文件读取、预览（纯函数 `analyze`）、倒计时 0-99 秒、每键间隔滑块。
+- Pixel 风格动画：环形倒计时（末 3 秒橙→红渐变）、注入中旋转 spinner。
 
 ### 三平台后端对照
 | 平台 | 注入方式 | 前置 |
@@ -78,6 +93,31 @@ enigo.key(Key::Return, Direction::Click);
 ```
 `enigo = "0.6"` 只在 `Cargo.toml` 的 `[target.'cfg(target_os = "windows")'.dependencies]` 下声明，macOS/Linux 不引入该依赖（保持零编译依赖）。
 
+### Cargo.toml 依赖门控（核心，不要搞混）
+```toml
+# 仅 Windows 需要 enigo
+[target.'cfg(target_os = "windows")'.dependencies]
+enigo = "0.6"
+
+# GUI：非 musl 构建自动带 GUI；Windows 用 glow 后端避开 wgpu/D3D12 编译问题
+[target.'cfg(all(not(target_env = "musl"), target_os = "windows"))'.dependencies]
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow"] }
+rfd = "0.17"
+
+[target.'cfg(all(not(target_env = "musl"), not(target_os = "windows"), not(target_os = "linux")))'.dependencies]
+eframe = "0.36"
+rfd = "0.17"
+
+[target.'cfg(all(not(target_env = "musl"), target_os = "linux"))'.dependencies]
+eframe = "0.36"
+rfd = "0.17"
+```
+
+**为什么 Windows 用 glow 而不是默认 wgpu？**
+- eframe 默认用 wgpu → D3D12 后端 → 依赖 `windows` crate 特定版本。
+- `enigo 0.6` 也依赖 `windows` crate，但版本不同 → 编译期冲突。
+- 强制 `features = ["glow"]` 走 OpenGL 后端，绕开 D3D12。
+
 ### CLI 契约（保持稳定，位置无关）
 | 命令 | 行为 |
 |---|---|
@@ -86,6 +126,7 @@ enigo.key(Key::Return, Direction::Click);
 | `./type-text 5 80` | 第 2 个裸数字 = 每键间隔毫秒（虚拟机丢字就调大） |
 | `./type-text -n` | 只预览解析结果，**不注入**（调试安全阀，必须保留） |
 | `./type-text -p` | 自检：打一行标记确认注入是否生效 |
+| `./type-text --gui` | 打开可视化界面（macOS / Linux / Windows 原生构建；Linux musl 静态版为纯 CLI） |
 | `<input> \| ./type-text` | 管道 / 重定向输入 |
 
 > 裸数字位置参数必须始终保留（兼容性）；`-n`/`-p` 为隐藏短开关，不写进正式帮助，但 `main()` 解析要认识它们。
@@ -101,7 +142,7 @@ cargo build --release                 # 产物 target/release/type-text
 rustc -O src/main.rs -o type-text     # 零依赖单文件编译（mac/Linux，无需联网）
 
 # Windows（在 windows 机器上）
-cargo build --release                 # enigo 会自动拉取
+cargo build --release                 # enigo 会自动拉取；GUI 自动可用（glow 后端）
 ```
 
 ### 从 macOS 交叉编译 Linux 静态二进制（musl）
@@ -124,6 +165,13 @@ printf 'Hello World 123\n\tTab test @#$%%\n' | ./type-text -n
 - `-n` **只解析预览、不注入键盘**，是唯一的调试安全阀，CI / 本地验证都优先用它。
 - macOS 上可用 `osacompile -o /dev/null /tmp/tt_inject.applescript` 校验生成的 AppleScript 语法（注入脚本会落盘到 `/tmp/tt_inject.applescript`）。
 - `-p` 会**真正打字**到当前窗口，只在明确要验证目标环境时使用，别在 CI 里跑。
+
+### hermes verify（本项目专用）
+```bash
+hermes verify --json --skip-start
+```
+- `--skip-start` 跳过 readiness 探测（CLI 工具无端口可探）。
+- 预期输出：`ok=true`，build 0 失败，test 0 失败。
 
 ---
 
@@ -159,6 +207,7 @@ strategy:
 3. **Linux 仅支持 X11**：Wayland 用户需要 `ydotool` 后端（可作为第四个 `#[cfg]` 变体）。
 4. **每键固定间隔**：可改为按目标响应动态退避（丢字检测 → 自动加间隔）。
 5. **无单测 / 集成测试**：`inject` 纯副作用（敲键盘），难单测；可考虑把「文本→键序列」的映射逻辑抽成纯函数，单独单测（这是最有价值的重构点）。
+6. **Windows 上 Ctrl-D 需手动检测**：Windows C 运行时原生只把 Ctrl-Z 当 EOF，Ctrl-D 字节 `0x04` 会被 `read()` 作为普通字节读入。`read_text()` 已用手动 1024 字节循环 + `0x04` 位置检测解决。**不要改回 `read_to_string()` / `read_line()`！**
 
 ---
 
@@ -169,3 +218,5 @@ strategy:
 - **保留 `-n` 干跑**：任何改动后先 `./type-text -n` 验证解析不崩。
 - **改了 `release.yml` 想重跑**：删旧 tag 重打即可（首次发布无 Release 产物时安全）；不要为了文档改动而盲目发新版本号。
 - **提交信息用中文或英文均可**，但 PR/commit 要说明「改了哪个平台后端 / 哪个 CI 环节」。
+- **Windows 不要改回 wgpu 默认后端**：`Cargo.toml` 中 Windows 的 eframe 必须带 `features = ["glow"]`，否则 `windows` crate 版本冲突导致编译失败。
+- **不要去掉 Windows 的 `0x04` 字节检测**：这是 Ctrl-D 在 Windows 下工作的唯一方式。

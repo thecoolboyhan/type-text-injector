@@ -11,15 +11,39 @@ use std::time::Duration;
 
 // ---------------------------------------------------------------- 读入文本（跨平台）
 /// 从 stdin 读全文，统一换行，去掉末尾多余空行。交互终端下打印提示。
+///
+/// 跨平台 EOF 处理：
+/// - Unix/macOS/Linux：Ctrl-D（字节 0x04）→ read 返回 0
+/// - Windows：默认只认 Ctrl-Z（0x1A）为 EOF；这里同时识别 Ctrl-D（0x04）以兼容 Unix 习惯
 pub fn read_text() -> String {
     let interactive = io::stdin().is_terminal();
     if interactive {
+        #[cfg(target_os = "windows")]
+        println!("请输入要输入的文本，输入完后按回车，再按 Ctrl-Z（或 Ctrl-D）结束：");
+        #[cfg(not(target_os = "windows"))]
         println!("请输入要输入的文本，输入完后按回车，再按 Ctrl-D 结束：");
     }
     let mut s = String::new();
-    if io::stdin().read_to_string(&mut s).is_err() {
-        eprintln!("读取输入失败");
-        std::process::exit(1);
+    let mut buf = [0u8; 1024];
+    loop {
+        match io::stdin().read(&mut buf) {
+            Ok(0) => break, // EOF（Unix 的 Ctrl-D，或 Windows 的 Ctrl-Z 被 C 运行时转为 EOF）
+            Ok(n) => {
+                #[cfg(target_os = "windows")]
+                {
+                    // Windows 控制台可能把 Ctrl-D 作为原始字节 0x04 传入，手动识别为 EOF
+                    if let Some(pos) = buf[..n].iter().position(|&b| b == 0x04) {
+                        s.push_str(&String::from_utf8_lossy(&buf[..pos]));
+                        break;
+                    }
+                }
+                s.push_str(&String::from_utf8_lossy(&buf[..n]));
+            }
+            Err(_) => {
+                eprintln!("读取输入失败");
+                std::process::exit(1);
+            }
+        }
     }
     // 统一换行，去掉末尾多余空行
     let mut s = s.replace("\r\n", "\n").replace('\r', "\n");
@@ -287,7 +311,7 @@ pub mod platform {
 // ---------------------------------------------------------------- GUI（非 musl 构建）
 // eframe/rfd 只在非 musl 目标上编译（见 Cargo.toml），模块同步条件编译，
 // 保证 Linux musl 静态交叉版仍是纯 CLI。
-// GUI 模块门控与 Cargo.toml 保持一致：非 musl 且非 Windows（Windows 因 eframe/wgpu D3D12 编译问题保持纯 CLI）
-#[cfg(all(not(target_env = "musl"), not(target_os = "windows")))]
+// GUI 模块门控与 Cargo.toml 保持一致：非 musl 即含 GUI（Windows 用 glow 后端避开 D3D12 编译问题）
+#[cfg(not(target_env = "musl"))]
 pub mod gui;
 
