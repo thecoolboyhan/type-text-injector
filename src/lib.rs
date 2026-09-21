@@ -287,6 +287,7 @@ pub mod platform {
 // ---------------------------------------------------------------- GUI（非 musl 构建）
 // eframe/rfd 只在非 musl 目标上编译（见 Cargo.toml），模块同步条件编译，
 // 保证 Linux musl 静态交叉版仍是纯 CLI。
-#[cfg(not(target_env = "musl"))]
+// GUI 模块门控与 Cargo.toml 保持一致：非 musl 且非 Windows（Windows 因 eframe/wgpu D3D12 编译问题保持纯 CLI）
+#[cfg(all(not(target_env = "musl"), not(target_os = "windows")))]
 pub mod gui;
 
