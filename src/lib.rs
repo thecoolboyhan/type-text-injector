@@ -77,6 +77,40 @@ pub fn is_injectable(c: char) -> bool {
     matches!(c, '\n' | '\r' | '\t') || c.is_ascii_graphic() || c == ' '
 }
 
+/// 每批键数。macOS 单条 AppleScript 的硬上限约 4039 键，留余量取 4000；
+/// Linux / Windows 逐键循环没有这个上限，但在同一位置留出相同的批间停顿，
+/// 让三端的节奏一致。
+pub const BATCH_KEYS: usize = 4000;
+
+/// 换行后的额外停顿（毫秒）。三端共用，避免批次/换行交界处丢字。
+pub fn line_delay_ms(delay_ms: u64) -> u64 {
+    delay_ms.saturating_mul(3).max(60)
+}
+
+/// US ANSI 布局下，该字符是否需要按住 Shift。**三端共用同一判定**：
+/// 同一个字符在 macOS / Linux / Windows 上按的是同一组物理键。
+pub fn needs_shift(c: char) -> bool {
+    c.is_ascii_uppercase()
+        || matches!(
+            c,
+            '!' | '@' | '#' | '$' | '%' | '^' | '&' | '*' | '(' | ')' | '_' | '+' | '{'
+                | '}' | '|' | ':' | '"' | '<' | '>' | '?' | '~'
+        )
+}
+
+/// US ANSI 布局下，字符对应的「未 Shift 基础字符」：'A'→'a'、'@'→'2'、'?'→'/'。
+/// 三端据此查各自的物理键码表，再按 needs_shift() 决定是否按住 Shift。
+pub fn base_key(c: char) -> char {
+    match c {
+        'A'..='Z' => c.to_ascii_lowercase(),
+        '!' => '1', '@' => '2', '#' => '3', '$' => '4', '%' => '5',
+        '^' => '6', '&' => '7', '*' => '8', '(' => '9', ')' => '0',
+        '_' => '-', '+' => '=', '{' => '[', '}' => ']', '|' => '\\',
+        ':' => ';', '"' => '\'', '<' => ',', '>' => '.', '?' => '/', '~' => '`',
+        _ => c,
+    }
+}
+
 /// 结尾「跳过字符」提示的样本上限。三端 inject 与 GUI 预览统一，避免长中文文本刷屏。
 pub const SKIPPED_SAMPLE_LIMIT: usize = 20;
 
@@ -174,6 +208,24 @@ mod common_tests {
         assert_eq!(a.skipped, p.skipped);
         assert!((a.est_secs - p.keys.len() as f64 * 0.053).abs() < 1e-9);
     }
+
+    #[test]
+    fn shift_and_base_key_are_consistent() {
+        // 三端共用这套判定：任一可打印 ASCII 归一后的基础字符必须可注入、且不需要 Shift。
+        for b in 0x20u8..=0x7eu8 {
+            let c = b as char;
+            let base = base_key(c);
+            assert!(is_injectable(base), "{:?} 的基础字符 {:?} 不可注入", c, base);
+            assert!(!needs_shift(base), "基础字符 {:?} 不应需要 Shift", base);
+            assert_eq!(base_key(base), base, "base_key 应幂等");
+        }
+        assert!(needs_shift('A'));
+        assert!(needs_shift('@'));
+        assert!(!needs_shift('a'));
+        assert_eq!(base_key('@'), '2');
+        assert_eq!(line_delay_ms(50), 150);
+        assert_eq!(line_delay_ms(1), 60);
+    }
 }
 
 // ---------------------------------------------------------------- 平台注入后端
@@ -183,50 +235,25 @@ mod common_tests {
 pub mod platform {
     use super::*;
 
-    /// macOS US ANSI 虚拟键码 -> (键码, 是否需要 Shift)
+    /// macOS US ANSI 虚拟键码。字符先经公共 `base_key()` 归一，
+    /// Shift 由公共 `needs_shift()` 判定 —— 与 Linux / Windows 同一套物理键语义。
     fn key_of(c: char) -> Option<(u32, bool)> {
-        Some(match c {
-            'a' => (0, false),   's' => (1, false),   'd' => (2, false),
-            'f' => (3, false),   'h' => (4, false),   'g' => (5, false),
-            'z' => (6, false),   'x' => (7, false),   'c' => (8, false),
-            'v' => (9, false),   'b' => (11, false),  'q' => (12, false),
-            'w' => (13, false),  'e' => (14, false),  'r' => (15, false),
-            'y' => (16, false),  't' => (17, false),  'o' => (31, false),
-            'u' => (32, false),  'i' => (34, false),  'p' => (35, false),
-            'l' => (37, false),  'j' => (38, false),  'k' => (40, false),
-            'n' => (45, false),  'm' => (46, false),
-            '1' => (18, false),  '2' => (19, false),  '3' => (20, false),
-            '4' => (21, false),  '5' => (23, false),  '6' => (22, false),
-            '7' => (26, false),  '8' => (28, false),  '9' => (25, false),
-            '0' => (29, false),
-            '-' => (27, false),  '=' => (24, false),  '[' => (33, false),
-            ']' => (30, false),  '\\' => (42, false), ';' => (41, false),
-            '\'' => (39, false), ',' => (43, false),  '.' => (47, false),
-            '/' => (44, false),  '`' => (50, false),
-            ' ' => (49, false),  '\t' => (48, false),
-            '\n' | '\r' => (36, false),
-
-            'A'..='Z' => {
-                let (k, _) = key_of(c.to_ascii_lowercase())?;
-                (k, true)
-            }
-            '!' => (18, true),   '@' => (19, true),   '#' => (20, true),
-            '$' => (21, true),   '%' => (23, true),   '^' => (22, true),
-            '&' => (26, true),   '*' => (28, true),   '(' => (25, true),
-            ')' => (29, true),   '_' => (27, true),   '+' => (24, true),
-            '{' => (33, true),   '}' => (30, true),   '|' => (42, true),
-            ':' => (41, true),   '"' => (39, true),   '<' => (43, true),
-            '>' => (47, true),   '?' => (44, true),   '~' => (50, true),
-
+        let k = match base_key(c) {
+            'a' => 0,  's' => 1,  'd' => 2,  'f' => 3,  'h' => 4,  'g' => 5,
+            'z' => 6,  'x' => 7,  'c' => 8,  'v' => 9,  'b' => 11, 'q' => 12,
+            'w' => 13, 'e' => 14, 'r' => 15, 'y' => 16, 't' => 17, 'o' => 31,
+            'u' => 32, 'i' => 34, 'p' => 35, 'l' => 37, 'j' => 38, 'k' => 40,
+            'n' => 45, 'm' => 46,
+            '1' => 18, '2' => 19, '3' => 20, '4' => 21, '5' => 23, '6' => 22,
+            '7' => 26, '8' => 28, '9' => 25, '0' => 29,
+            '-' => 27, '=' => 24, '[' => 33, ']' => 30, '\\' => 42, ';' => 41,
+            '\'' => 39, ',' => 43, '.' => 47, '/' => 44, '`' => 50,
+            ' ' => 49, '\t' => 48,
+            '\n' | '\r' => 36,
             _ => return None,
-        })
+        };
+        Some((k, needs_shift(c)))
     }
-
-    /// 单条 AppleScript 最多容纳的键数。
-    /// 实测 osascript 运行时 `set ks to {...}` 字面量约 8080 个数字项即报「堆栈溢出(-2706)」，
-    /// 即 4039 键；取 4000 留余量。每个键占 2 项：虚拟键码 + 是否需要 Shift。
-    /// 长文本按此大小切片，逐批生成脚本依次执行（仍然是 key code 级注入）。
-    const MAX_KEYS_PER_BATCH: usize = 4000;
 
     /// 纯函数：把 plan() 筛出的键编译成 [keycode, shift, ...]。
     /// 若键位表出现映射缺口，直接报错而不是静默少打一个键（保证三端键数一致）。
@@ -246,7 +273,7 @@ pub mod platform {
 
     /// 把一批键序列编译成 AppleScript 源码。虚拟机只认 HID 扫描码，
     /// 因此这里必须是 `key code N`（可带 `using shift down`），不能改回整段 keystroke。
-    fn build_script(flat: &[i64], delay_ms: u64, line_delay_ms: u64) -> String {
+    fn build_script(flat: &[i64], delay_ms: u64, line_gap_ms: u64) -> String {
         let list = flat.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
         format!(
             r#"set d to {d}
@@ -269,7 +296,7 @@ tell application "System Events"
 	end repeat
 end tell"#,
             d = (delay_ms as f64) / 1000.0,
-            d2 = (line_delay_ms as f64) / 1000.0,
+            d2 = (line_gap_ms as f64) / 1000.0,
             list = list
         )
     }
@@ -285,17 +312,17 @@ end tell"#,
         }
 
         let keys = flat.len() / 2;
-        let line_delay_ms = delay_ms.saturating_mul(3).max(60);
-        let chunks: Vec<&[i64]> = flat.chunks(MAX_KEYS_PER_BATCH * 2).collect();
+        let line_gap_ms = crate::line_delay_ms(delay_ms);
+        let chunks: Vec<&[i64]> = flat.chunks(BATCH_KEYS * 2).collect();
         let batches = chunks.len();
         let path = "/tmp/tt_inject.applescript";
 
         for (idx, chunk) in chunks.iter().enumerate() {
             if idx > 0 {
                 // 上一条 osascript 退出后给目标窗口一点缓冲，避免批次交界处丢字
-                thread::sleep(Duration::from_millis(line_delay_ms));
+                thread::sleep(Duration::from_millis(line_gap_ms));
             }
-            let script = build_script(chunk, delay_ms, line_delay_ms);
+            let script = build_script(chunk, delay_ms, line_gap_ms);
             std::fs::write(path, script).map_err(|e| format!("写入注入脚本失败: {}", e))?;
             let out = Command::new("osascript")
                 .arg(path)
@@ -352,9 +379,9 @@ end tell"#,
 
         #[test]
         fn long_text_splits_into_even_sized_batches() {
-            let text = "a".repeat(MAX_KEYS_PER_BATCH * 3 + 7);
+            let text = "a".repeat(BATCH_KEYS * 3 + 7);
             let flat = compile_keys(&plan(&text).keys).unwrap();
-            let chunks: Vec<&[i64]> = flat.chunks(MAX_KEYS_PER_BATCH * 2).collect();
+            let chunks: Vec<&[i64]> = flat.chunks(BATCH_KEYS * 2).collect();
             assert_eq!(chunks.len(), 4, "3 满批 + 1 尾巴");
             let mut total = 0usize;
             for c in &chunks {
@@ -378,6 +405,18 @@ end tell"#,
             assert!(s.contains("set ks to {"));
             assert!(s.contains("set d to 0.05"));
         }
+
+        #[test]
+        fn keycode_shift_matches_public_rule() {
+            // macOS 键码表里每个字符的 Shift 判定必须与公共 needs_shift() 一致，
+            // 这样同一个字符在 Windows / Linux 上按的是同一组物理键。
+            let mut chars: Vec<char> = (0x20u8..=0x7eu8).map(|b| b as char).collect();
+            chars.extend(['\t', '\r', '\n']);
+            for c in chars {
+                let (_, shift) = key_of(c).unwrap();
+                assert_eq!(shift, needs_shift(c), "字符 {:?} 的 Shift 判定不一致", c);
+            }
+        }
     }
 
     /// 自检：分别用 Unicode 字符串注入与 keycode 注入各打一行，看虚拟机认哪种。
@@ -400,6 +439,8 @@ end tell"#,
 pub mod platform {
     use super::*;
 
+    /// `xdotool type` / `key` 都通过 X11 XTEST 伪造按键事件（keysym→keycode，自动带
+    /// Shift），与 macOS 的 `key code`、Windows 的 VK+扫描码属于同一事件层级。
     fn xdotool(args: &[&str]) -> Result<(), String> {
         match Command::new("xdotool").args(args).output() {
             Ok(o) if o.status.success() => Ok(()),
@@ -409,17 +450,25 @@ pub mod platform {
     }
 
     pub fn inject(text: &str, delay_ms: u64) -> Result<InjectResult, String> {
-        let d = delay_ms.to_string();
         let p = plan(text);
         if p.keys.is_empty() {
             return Err("没有可输入的内容（只支持英文/数字/标点）".into());
         }
         // 字符过滤由统一 plan() 负责：只有可注入字符会走到这里，键数即 p.keys.len()。
-        for ch in &p.keys {
-            match *ch {
-                '\n' | '\r' => xdotool(&["key", "--delay", &d, "Return"])?,
-                '\t' => xdotool(&["key", "--delay", &d, "Tab"])?,
-                c => xdotool(&["type", "--delay", &d, &c.to_string()])?,
+        // `--delay 0`：xdotool 自己默认每字 12ms，会和统一的 delay_ms 叠加，
+        // 导致同样的间隔参数在 Linux 上比另外两端慢；节奏改由下面的 sleep 统一控制。
+        let line_gap_ms = crate::line_delay_ms(delay_ms);
+        for (i, &ch) in p.keys.iter().enumerate() {
+            match ch {
+                '\n' | '\r' => xdotool(&["key", "--delay", "0", "Return"])?,
+                '\t' => xdotool(&["key", "--delay", "0", "Tab"])?,
+                c => xdotool(&["type", "--delay", "0", &c.to_string()])?,
+            }
+            // 节奏与 macOS 脚本里的 `delay d`/`delay d2`、Windows 的 sleep 完全一致；
+            // 批边界也留同样的停顿，三端长文本行为对齐。
+            thread::sleep(Duration::from_millis(delay_ms));
+            if ch == '\n' || ch == '\r' || (i + 1) % BATCH_KEYS == 0 {
+                thread::sleep(Duration::from_millis(line_gap_ms));
             }
         }
         Ok(InjectResult { keys: p.keys.len(), skipped_count: p.skipped_count, skipped: p.skipped })
@@ -433,27 +482,57 @@ pub mod platform {
     }
 }
 
-/// Windows：调用 enigo（Win32 SendInput，逐字打入并加间隔）
+/// Windows：enigo 0.6 + Win32 SendInput，**逐键发虚拟键码 + 扫描码**。
+/// 不用 `enigo.text()`：它在 Windows 上走 `KEYEVENTF_UNICODE`（wVk=0，wScan=UTF-16
+/// 码元），是字符注入而非键盘事件，虚拟机 / 远程桌面 / 受限窗口收不到。
 #[cfg(target_os = "windows")]
 pub mod platform {
     use super::*;
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 
+    /// US ANSI 基础键 -> Win32 虚拟键码。写死表，不依赖当前键盘布局；
+    /// `Key::Other(vk)` 经 enigo 的 MapVirtualKeyExW 转成扫描码后由 SendInput 发出。
+    fn win_vk(base: char) -> Option<u32> {
+        Some(match base {
+            'a'..='z' => base.to_ascii_uppercase() as u32, // VK_A..VK_Z = 0x41..0x5A
+            '0'..='9' => base as u32,                      // VK_0..VK_9 = 0x30..0x39
+            ' ' => 0x20,             // VK_SPACE
+            '\t' => 0x09,            // VK_TAB
+            '\n' | '\r' => 0x0D,     // VK_RETURN
+            '-' => 0xBD, '=' => 0xBB, '[' => 0xDB, ']' => 0xDD,
+            '\\' => 0xDC, ';' => 0xBA, '\'' => 0xDE, ',' => 0xBC,
+            '.' => 0xBE, '/' => 0xBF, '`' => 0xC0,
+            _ => return None,
+        })
+    }
+
     pub fn inject(text: &str, delay_ms: u64) -> Result<InjectResult, String> {
-        let mut enigo = Enigo::new(&Settings::default()).map_err(|e| format!("初始化 enigo 失败：{:?}", e))?;
-        let gap = Duration::from_millis(delay_ms);
+        let mut enigo = Enigo::new(&Settings::default())
+            .map_err(|e| format!("初始化 enigo 失败：{:?}", e))?;
         let p = plan(text);
         if p.keys.is_empty() {
             return Err("没有可输入的内容（只支持英文/数字/标点）".into());
         }
-        // 同 Linux：字符过滤与计数统一交给 plan()。
-        for ch in &p.keys {
-            match *ch {
-                '\n' | '\r' => { let _ = enigo.key(Key::Return, Direction::Click); }
-                '\t' => { let _ = enigo.key(Key::Tab, Direction::Click); }
-                c => { let _ = enigo.text(&c.to_string()); }
+        let line_gap_ms = crate::line_delay_ms(delay_ms);
+        for (i, &ch) in p.keys.iter().enumerate() {
+            let vk = win_vk(base_key(ch))
+                .ok_or_else(|| format!("键位表缺少字符 {:?} 的 Win32 虚拟键码", ch))?;
+            let shift = needs_shift(ch);
+            if shift {
+                enigo.key(Key::Shift, Direction::Press)
+                    .map_err(|e| format!("按下 Shift 失败：{:?}", e))?;
             }
-            thread::sleep(gap);
+            enigo.key(Key::Other(vk), Direction::Click)
+                .map_err(|e| format!("发送虚拟键码 {} 失败：{:?}", vk, e))?;
+            if shift {
+                enigo.key(Key::Shift, Direction::Release)
+                    .map_err(|e| format!("松开 Shift 失败：{:?}", e))?;
+            }
+            // 与 macOS / Linux 完全相同的节奏：每键间隔 + 换行/批边界额外停顿。
+            thread::sleep(Duration::from_millis(delay_ms));
+            if ch == '\n' || ch == '\r' || (i + 1) % BATCH_KEYS == 0 {
+                thread::sleep(Duration::from_millis(line_gap_ms));
+            }
         }
         Ok(InjectResult { keys: p.keys.len(), skipped_count: p.skipped_count, skipped: p.skipped })
     }

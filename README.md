@@ -36,8 +36,8 @@ cargo build --release
 | 平台 | 注入后端 | 前置依赖 | GUI |
 |---|---|---|---|
 | macOS | `osascript` keycode（最稳，能进虚拟机） | 系统自带；需授予「辅助功能」权限 | ✅ |
-| Linux | `xdotool`（逐字 type / key） | 需安装 `xdotool`（如 `apt install xdotool`） | ✅（X11；Wayland 需 ydotool） |
-| Windows | `enigo`（Win32 SendInput） | 自动包含，无需额外依赖 | ✅（glow/OpenGL 后端） |
+| Linux | `xdotool`（X11 XTEST 按键事件，逐键） | 需安装 `xdotool`（如 `apt install xdotool`） | ✅（X11；Wayland 需 ydotool） |
+| Windows | `enigo`（Win32 SendInput：VK + 扫描码，逐键） | 自动包含，无需额外依赖 | ✅（glow/OpenGL 后端） |
 
 Release 页提供三个平台编译好的可执行文件，开箱即用（Windows 版需本机有 VC++ 运行库，一般已自带）。
 
@@ -51,7 +51,13 @@ Release 页提供三个平台编译好的可执行文件，开箱即用（Window
 
 原因：虚拟机/远程桌面只认 **HID 扫描码**。`keystroke "字符串"` 走的是 CGEvent 的 **Unicode 字符串**载荷，客户机拿不到扫描码 → 整串被丢弃；而 `key code N`（真实虚拟键码）能映射成 HID 报告 → 正常进字。
 
-macOS 版**全部用 keycode 级注入**，因此能稳定打进 Parallels / VMware 等虚拟机。Linux（`xdotool type`）、Windows（enigo `text()`）走各自平台的**逐字符文本事件**，常规窗口可用；进虚拟机的可靠性本项目只对 macOS 做过实测，另外两端请先用 `-p` 自检确认。
+三个平台现在**都是逐键模拟键盘输入**，同一个字符在三端按下的物理键序列一致：
+
+- macOS：`key code N` 虚拟键码 → HID 扫描码（能进 Parallels / VMware 的关键）。
+- Linux：`xdotool type` / `key` 走 X11 **XTEST** 按键事件（keysym→keycode，自动带 Shift）。
+- Windows：enigo `SendInput` 发 Win32 虚拟键码 + 扫描码；**不再用 `enigo.text()`** —— 后者是 `KEYEVENTF_UNICODE` 字符注入（wVk=0、wScan=UTF-16 码元），虚拟机 / 远程桌面 / 受限窗口收不到。
+
+三端共用同一套 US ANSI 键位判定（`base_key()` / `needs_shift()`）和同一套节奏（每键间隔、换行与批边界的额外停顿）。虚拟机场景只在 macOS 做过实测，Linux / Windows 请先用 `-p` 自检。
 
 ---
 
@@ -178,7 +184,7 @@ macOS 版会**自动分批**：单条 AppleScript 的键码列表约 4039 键就
 
 - 可注入范围：可打印 ASCII + 空格 / Tab / 换行；非 ASCII 一律跳过。
 - 跳过字符的提示样本统一只留前 20 个（`SKIPPED_SAMPLE_LIMIT`），长中文文本不会刷屏。
-- 只有 macOS 是 `key code` 级注入；Linux / Windows 是逐字符文本事件，虚拟机场景未经本项目实测。
+- 三端都是**逐键真实键事件**（键码/扫描码），不再有 Unicode 字符串注入路径；虚拟机场景仍只对 macOS 做过实测，Linux / Windows 请先用 `-p` 自检。
 
 ---
 

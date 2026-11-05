@@ -7,7 +7,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use crate::platform;
-use crate::{analyze, InjectResult, Preview};
+use crate::{analyze, InjectResult, Preview, BATCH_KEYS};
 
 /// egui 通过 eframe 引用（eframe 依赖树中自带，不单独引 crate）
 use eframe::egui;
@@ -25,6 +25,33 @@ const TRACK: egui::Color32 = egui::Color32::from_rgb(0xE0, 0xE6, 0xEF); // 进�
 const SUCCESS: egui::Color32 = egui::Color32::from_rgb(0x18, 0x80, 0x38); // Google 绿
 const ERROR: egui::Color32 = egui::Color32::from_rgb(0xD9, 0x30, 0x25); // Google 红
 const WARNING: egui::Color32 = egui::Color32::from_rgb(0xF9, 0xAB, 0x00); // 倒计时橙
+
+/// 平台标识与排错提示。三端 UI 结构、配色、字号完全一致，只有这一行文字按平台变化。
+const PLATFORM_NAME: &str = if cfg!(target_os = "macos") {
+    "macOS"
+} else if cfg!(target_os = "windows") {
+    "Windows"
+} else {
+    "Linux"
+};
+
+const PLATFORM_HINT: &str = if cfg!(target_os = "macos") {
+    "macOS：需在「系统设置 → 隐私与安全性 → 辅助功能」授权运行本程序的终端 / App"
+} else if cfg!(target_os = "windows") {
+    "Windows：确认目标窗口在前台，且未被 UAC / 高权限窗口遮挡"
+} else {
+    "Linux：需 X11 会话并已安装 xdotool（Wayland 暂不支持）"
+};
+
+/// 秒数格式化（三端一致的中文显示）
+fn fmt_secs(s: f64) -> String {
+    let n = s.max(0.0) as u64;
+    if n >= 60 {
+        format!("{}分{:02}秒", n / 60, n % 60)
+    } else {
+        format!("{}秒", n)
+    }
+}
 
 /// 颜色线性插值（最后 3 秒倒计时环 橙→红 渐变用）
 fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
@@ -60,32 +87,43 @@ pub fn run() {
     );
 }
 
+/// 三端统一的中文字体候选（按「现代→通用」排序）。任一候选命中即可；
+/// 全都找不到时退回 egui 默认字体，界面不崩、布局不变（只是中文显示为方框）。
+const CJK_FONTS_MACOS: &[&str] = &[
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+];
+const CJK_FONTS_WINDOWS: &[&str] = &[
+    "C:\\Windows\\Fonts\\msyh.ttc",
+    "C:\\Windows\\Fonts\\msyh.ttf",
+    "C:\\Windows\\Fonts\\simhei.ttf",
+    "C:\\Windows\\Fonts\\simsun.ttc",
+];
+const CJK_FONTS_LINUX: &[&str] = &[
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/arphic/uming.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+];
+
+fn cjk_font_candidates() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        CJK_FONTS_MACOS
+    } else if cfg!(target_os = "windows") {
+        CJK_FONTS_WINDOWS
+    } else {
+        CJK_FONTS_LINUX
+    }
+}
+
 /// 从系统加载中文字体（egui 默认字体不含中文，且与 CJK 混排观感割裂）。
 /// - Proportional（界面文字）：中文字体插到**首位**，中英混排风格统一（黑体自带拉丁字形）
 /// - Monospace（文本区）：保持等宽字体优先，中文追加到末尾做回退
 fn setup_cjk_font(ctx: &egui::Context) {
-    // 按「现代→通用」排序：macOS 优先冬青黑体（比华文黑体笔画现代），再退苹方/华文
-    #[cfg(target_os = "macos")]
-    const CANDIDATES: &[&str] = &[
-        "/System/Library/Fonts/Hiragino Sans GB.ttc",
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/STHeiti Light.ttc",
-    ];
-    #[cfg(target_os = "windows")]
-    const CANDIDATES: &[&str] = &[
-        "C:\\Windows\\Fonts\\msyh.ttc",
-        "C:\\Windows\\Fonts\\msyh.ttf",
-        "C:\\Windows\\Fonts\\simhei.ttf",
-    ];
-    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
-    const CANDIDATES: &[&str] = &[
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-        "/usr/share/fonts/truetype/arphic/uming.ttc",
-    ];
-
     let mut fonts = egui::FontDefinitions::default();
-    for path in CANDIDATES {
+    for path in cjk_font_candidates() {
         let Ok(bytes) = std::fs::read(path) else { continue };
         fonts
             .font_data
@@ -132,6 +170,8 @@ fn apply_material_theme(ctx: &egui::Context) {
     visuals.override_text_color = Some(TEXT_PRIMARY);
     visuals.text_cursor.stroke = egui::Stroke::new(2.0, PRIMARY);
 
+    // 强制三端都用浅色，不跟随系统深色模式（否则系统深色时配色会不一致）
+    ctx.set_theme(egui::Theme::Light);
     ctx.set_visuals(visuals);
 
     // 字号调大（egui 默认 12.5px 中文显小发虚）+ 间距 + 交互动画时长
@@ -177,6 +217,10 @@ struct GuiApp {
     start_hovered: bool,         // 上一帧「开始输入」是否被悬停（主按钮 hover 变色）
     inject_tx: Sender<InjectMsg>,
     inject_rx: Receiver<InjectMsg>,
+    inject_started: Option<Instant>, // 本次注入开始时间（估算进度）
+    inject_est_secs: f64,            // 预计总耗时（analyze 口径，三端一致）
+    inject_keys: usize,              // 本次将注入的键数
+    inject_batches: usize,           // 批次数（长文本分批，三端节奏一致）
 }
 
 impl GuiApp {
@@ -197,6 +241,10 @@ impl GuiApp {
             start_hovered: false,
             inject_tx: tx,
             inject_rx: rx,
+            inject_started: None,
+            inject_est_secs: 0.0,
+            inject_keys: 0,
+            inject_batches: 0,
         }
     }
 
@@ -233,6 +281,11 @@ impl GuiApp {
         let text = self.text.clone();
         let delay_ms = self.delay_ms;
         let tx = self.inject_tx.clone();
+        let stats = analyze(&text, delay_ms);
+        self.inject_est_secs = stats.est_secs;
+        self.inject_keys = stats.keys;
+        self.inject_batches = stats.keys.div_ceil(BATCH_KEYS).max(1);
+        self.inject_started = Some(Instant::now());
         self.busy = true;
         self.countdown_left = None;
         self.set_status("正在输入… 不要移动焦点", false);
@@ -251,6 +304,7 @@ impl GuiApp {
     fn poll_inject(&mut self) {
         if let Ok(InjectMsg::Done(r)) = self.inject_rx.try_recv() {
             self.busy = false;
+            self.inject_started = None;
             match r {
                 Ok(r) => {
                     let mut msg = format!("✔ 完成，共输入 {} 个键。", r.keys);
@@ -264,13 +318,7 @@ impl GuiApp {
                     self.set_status(&msg, false);
                 }
                 Err(e) => {
-                    self.set_status(
-                        &format!(
-                            "✘ {}\n提示：macOS 需在「系统设置 → 隐私与安全性 → 辅助功能」授权后注入才能生效",
-                            e
-                        ),
-                        true,
-                    );
+                    self.set_status(&format!("✘ {}\n提示：{}", e, PLATFORM_HINT), true);
                 }
             }
         }
@@ -376,6 +424,28 @@ impl GuiApp {
         );
     }
 
+    /// 长文本注入时的进度反馈：按「已用时间 / 预计耗时」估算。
+    /// 三端节奏已统一，所以这个估算在三端含义相同（不虚报已注入键数）。
+    fn draw_progress(&self, ui: &mut egui::Ui) {
+        let Some(started) = self.inject_started else { return };
+        let elapsed = started.elapsed().as_secs_f64();
+        let frac = (elapsed / self.inject_est_secs.max(0.1)).clamp(0.0, 0.99) as f32;
+        let w = ui.available_width().min(420.0);
+        ui.add(egui::ProgressBar::new(frac).desired_width(w).fill(PRIMARY));
+        ui.label(
+            egui::RichText::new(format!(
+                "约 {:.0}% · {} 键 / {} 批 · 已用 {} / 预计 {}",
+                frac * 100.0,
+                self.inject_keys,
+                self.inject_batches,
+                fmt_secs(elapsed),
+                fmt_secs(self.inject_est_secs),
+            ))
+            .size(12.0)
+            .color(TEXT_SECONDARY),
+        );
+    }
+
     /// 倒计时：环形进度 + 平滑数字 + 末段变色
     fn draw_countdown(&mut self, ui: &mut egui::Ui, left: f32) {
         ui.horizontal(|ui| {
@@ -459,9 +529,20 @@ impl eframe::App for GuiApp {
                                 .strong()
                                 .color(egui::Color32::from_rgba_unmultiplied(255, 255, 255, 210)),
                         );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "v{} · {}",
+                                    env!("CARGO_PKG_VERSION"),
+                                    PLATFORM_NAME
+                                ))
+                                .size(12.0)
+                                .color(egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220)),
+                            );
+                        });
                     });
                     ui.label(
-                        egui::RichText::new("把文本模拟键盘输入到虚拟机 / 远程桌面")
+                        egui::RichText::new("逐键模拟键盘输入到虚拟机 / 远程桌面 · 不经过剪贴板 · 仅英文/数字/标点")
                             .size(12.5)
                             .color(egui::Color32::from_rgba_unmultiplied(255, 255, 255, 170)),
                     );
@@ -499,6 +580,24 @@ impl eframe::App for GuiApp {
                             .color(TEXT_SECONDARY),
                     );
                 });
+                ui.add_space(6.0);
+                // 实时统计（与 CLI 的 analyze() 同一口径，不用点预览就能看到长文本规模）
+                let stats = analyze(&self.text, self.delay_ms);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new(format!("可注入 {} 键", stats.keys)).size(12.5).color(TEXT_SECONDARY));
+                    ui.label("·");
+                    ui.label(egui::RichText::new(format!("预计 {}", fmt_secs(stats.est_secs))).size(12.5).color(TEXT_SECONDARY));
+                    ui.label("·");
+                    ui.label(egui::RichText::new(format!("{} 批", stats.keys.div_ceil(BATCH_KEYS).max(1))).size(12.5).color(TEXT_SECONDARY));
+                    if stats.skipped_count > 0 {
+                        ui.label(
+                            egui::RichText::new(format!("· 跳过 {} 个非 ASCII", stats.skipped_count))
+                                .size(12.5)
+                                .color(ERROR),
+                        );
+                    }
+                });
+                ui.label(egui::RichText::new(PLATFORM_HINT).size(11.5).color(TEXT_SECONDARY));
             });
             ui.add_space(10.0);
 
@@ -524,6 +623,19 @@ impl eframe::App for GuiApp {
                 {
                     self.preview = Some(analyze(&self.text, self.delay_ms));
                     self.preview_open = true;
+                }
+                if ui
+                    .add(
+                        egui::Button::new("🗑 清空")
+                            .corner_radius(20)
+                            .min_size(egui::vec2(0.0, 40.0)),
+                    )
+                    .clicked()
+                    && !self.busy
+                {
+                    self.text.clear();
+                    self.preview = None;
+                    self.set_status("已清空文本。", false);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let cancel_btn = ui.add_enabled(
@@ -581,12 +693,14 @@ impl eframe::App for GuiApp {
                 ui.add_space(6.0);
                 // 文本区填满卡片剩余空间（预留底部状态区高度；错误状态信息更长，多预留）
                 let avail = ui.available_size();
-                let status_h = if self.status_error {
-                    78.0
-                } else if self.busy || self.countdown_left.is_some() {
-                    84.0
+                let status_h = if self.busy {
+                    128.0 // spinner + 进度条 + 状态文字
+                } else if self.countdown_left.is_some() {
+                    88.0
+                } else if self.status_error {
+                    82.0
                 } else {
-                    34.0
+                    38.0
                 };
                 ui.add_sized(
                     egui::vec2(avail.x, (avail.y - status_h).max(70.0)),
@@ -600,6 +714,10 @@ impl eframe::App for GuiApp {
                 ui.horizontal(|ui| {
                     if self.busy {
                         self.draw_spinner(ui);
+                        ui.vertical(|ui| {
+                            ui.add_space(8.0);
+                            self.draw_progress(ui);
+                        });
                     } else if let Some(left) = self.countdown_left {
                         self.draw_countdown(ui, left);
                     }
@@ -646,7 +764,17 @@ impl eframe::App for GuiApp {
                                     ui.end_row();
                                     ui.label("预计耗时");
                                     ui.label(
-                                        egui::RichText::new(format!("约 {:.0} 秒", p.est_secs)).strong(),
+                                        egui::RichText::new(format!("约 {}", fmt_secs(p.est_secs))).strong(),
+                                    );
+                                    ui.end_row();
+                                    ui.label("注入批次");
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} 批（每批 {} 键）",
+                                            p.keys.div_ceil(BATCH_KEYS).max(1),
+                                            BATCH_KEYS
+                                        ))
+                                        .strong(),
                                     );
                                     ui.end_row();
                                     ui.label("跳过字符");

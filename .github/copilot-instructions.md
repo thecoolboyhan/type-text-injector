@@ -13,7 +13,10 @@
 
 ## 硬性约束（不要违反）
 
-1. macOS 后端必须用 **keycode 级注入**（`key code N`），**禁止回归**到整段 `keystroke`——否则虚拟机场景崩掉。Linux（`xdotool type`）/ Windows（enigo `text()`）是逐字符文本事件，虚拟机可靠性未经本项目实测。
+1. 三端后端**必须都是逐键真实键事件**：macOS `key code N`、Linux `xdotool type/key`（XTEST）、Windows `enigo.key(Key::Other(vk), …)`（`wVk` + 扫描码）。
+   - **禁止**回归到整段 `keystroke "字符串"`，也**禁止** Windows 改回 `enigo.text()`（`KEYEVENTF_UNICODE`）——两者都会让虚拟机 / 远程桌面场景崩掉。
+   - Windows 的 Shift 必须自己 `Press/Release`（enigo 会丢掉 `VkKeyScanExW` 的 shift 位）；键位判定统一走 `base_key()` / `needs_shift()`。
+   - 节奏统一走 `delay_ms` + `line_delay_ms()`，`BATCH_KEYS = 4000` 为分批与批边界停顿阈值，三端共用。
 2. CI 矩阵必须用 `os: [...]` + `include` 写法，不要用 list-of-maps。
 3. 单条命令、零交互主流程：`启动 → 读文本 → 倒计时 → 逐键注入`。不要给 CLI 加功能清单。
 4. 始终保留 `-n`（干跑预览，不注入）作为调试安全阀。

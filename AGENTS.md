@@ -31,9 +31,17 @@
 | `keystroke "字符串"` / enigo `text()` | Unicode 字符串 | 拿不到扫描码 → **整串丢弃** |
 | `key code N` / enigo `key(Key, Click)` | 真实虚拟键码 | 能映射成 HID 报告 → **正常投递** |
 
-**因此**：macOS 后端**全部用 `key code N`**（真实虚拟键码 + Shift 标志），这是它能稳定打进 Parallels / VMware 的原因。Linux（`xdotool type`）/ Windows（enigo `text()`）走的是**逐字符文本事件**，并非 keycode；本项目只对 macOS 的虚拟机场景做过实测，另外两端不要套用「同样可靠」的结论，使用前请先用 `-p` 自检。
+**因此**：三端后端**全部走真实键事件**（逐键、带键码/扫描码 + Shift 标志），没有任何「整串 Unicode 字符串」路径：
 
-> ⚠️ 任何「改回整段 `keystroke`」的"简化"都会让虚拟机场景重新崩掉。这是本项目存在的全部理由，不要回归。
+| 平台 | 实现 | 载体 |
+|---|---|---|
+| macOS | AppleScript `key code N` | 虚拟键码 → HID 扫描码 |
+| Linux | `xdotool type` / `key` | X11 XTEST 按键事件（keysym→keycode） |
+| Windows | `enigo.key(Key::Unicode/…, Click)` | Win32 `SendInput` + `wVk` + 扫描码 |
+
+> ⚠️ 任何「改回整段 `keystroke`」或「Windows 改回 `enigo.text()`」的"简化"都会让虚拟机场景重新崩掉。这是本项目存在的全部理由，不要回归。
+
+> 虚拟机实测覆盖：macOS（Parallels / VMware 已实测）。Linux / Windows 的键事件层级与 macOS 相同，但**本仓库未做过虚拟机实测**，使用前请先用 `-p` 自检。
 
 **次要坑（虚拟机仍可能零星丢字）**：keycode 级注入能进虚拟机，但字符仍可能被目标键盘缓冲 / HID 队列丢弃。唯一有效手段是**拉大每键间隔**（默认 50ms，丢字就 80/120/200ms 逐档加）。代价 = 字符数 × 间隔，开工前必须打印预计耗时。
 
@@ -66,7 +74,7 @@ type-text-injector/
 - `mod platform`：**用 `#[cfg(target_os = "...")]` 编译期分三个后端**，每个暴露统一接口：
   - `inject(text: &str, delay_ms: u64) -> Result<InjectResult, String>`：`InjectResult { keys, skipped_count, skipped }` = 键数 / 跳过总数 / 跳过样本。三端签名一致，CLI 与 GUI 共用；不要在显示层把 `skipped.len()` 当成总数。
   - `probe(secs, delay_ms)`：自检，打一行标记确认注入生效。
-- **macOS 后端的长文本分批（v0.3.0 起）**：`const MAX_KEYS_PER_BATCH = 4000`。单条 AppleScript 的 `set ks to {...}` 字面量约 8080 个数字项（=4039 键）就会 `堆栈溢出 (-2706)`，这是运行时的项数上限、与字符内容无关。`inject()` 先用纯函数 `compile_keys()`（基于 `plan()`；键位表缺映射时直接报错，不静默少打键）把文本编译成 `[keycode, shift, ...]` 扁平序列，再按 4000 键切片，每片由 `build_script()` 生成一条独立脚本依次 `osascript` 执行；批间 sleep `max(delay×3, 60)`ms 防止交界处丢字。共 8 个单测（4 个三端共通 + 4 个 macOS 专属，含「全部可注入字符都有键码映射」）。**不要改回单条脚本。**
+- **长文本分批（v0.3.0 起，三端共用 `BATCH_KEYS = 4000`）**：单条 AppleScript 的 `set ks to {...}` 字面量约 8080 个数字项（=4039 键）就会 `堆栈溢出 (-2706)`，这是运行时的项数上限、与字符内容无关。macOS `inject()` 先用纯函数 `compile_keys()`（基于 `plan()`；键位表缺映射时直接报错，不静默少打键）把文本编译成 `[keycode, shift, ...]` 扁平序列，再按 `BATCH_KEYS` 切片，每片由 `build_script()` 生成一条独立脚本依次 `osascript` 执行。三端在**换行处**和**每 `BATCH_KEYS` 键的批边界**都额外 sleep `line_delay_ms() = max(delay×3, 60)`ms，节奏完全一致。共 10 个单测（4 个三端共通 + 6 个 macOS 专属，含「全部可注入字符都有键码映射」）。**不要改回单条脚本。**
 - `mod gui`：**用 `#[cfg(not(target_env = "musl"))]` 门控**，非 musl 构建（macOS / Linux / Windows）自动包含 GUI。
 
 ### `src/main.rs` 结构（仅 CLI 入口，约 106 行）
@@ -83,17 +91,23 @@ type-text-injector/
 |---|---|---|
 | macOS | `osascript` 生成一条 AppleScript，循环 `key code N`（含 `using shift down`），回车=`key code 36` | 系统自带；需「辅助功能」授权终端 |
 | Linux | `xdotool type --delay N <char>` / `xdotool key --delay N Return\|Tab` | 需装 `xdotool`，且为 X11 会话（Wayland 暂不支持） |
-| Windows | `enigo 0.6`：`Enigo::new(&Settings::default())` + `Keyboard::text(&str)` / `key(Key::Return, Direction::Click)` | 编译期自动拉取，无需用户额外依赖 |
+| Windows | `enigo 0.6`：`Enigo::new(&Settings::default())` + 逐键 `key(Key, Direction)`（`wVk` + 扫描码）/ `key(Key::Return, Direction::Click)` | 编译期自动拉取，无需用户额外依赖 |
 
-> 只有 macOS 后端是 `key code` 虚拟键码级；Linux / Windows 是逐字符文本事件。但三者**共用 `plan()` 的字符过滤、键数统计与跳过样本上限**，这是 v0.3.0 修齐的部分。
+> 三端**都是逐键真实键事件**（macOS 虚拟键码 / Linux XTEST 按键 / Windows `wVk`+扫描码），没有任何 Unicode 整串注入路径。三者还**共用 `plan()` 的字符过滤、键数统计与跳过样本上限，以及 `base_key()`/`needs_shift()` 的 US ANSI 键位判定和同一套节奏常量**，这是 v0.3.0 统一的部分。
 
 **Windows 专属细节（enigo 0.6 正确 API）**：
 ```rust
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 let mut enigo = Enigo::new(&Settings::default()).map_err(...)?;  // 返回 Result
-enigo.text(&c.to_string());
-enigo.key(Key::Return, Direction::Click);
+// 逐键：字母数字符号按 US ANSI 映射成 Key，需要 Shift 时手动按下/抬起
+enigo.key(key, Direction::Click);
+enigo.key(Key::Shift, Direction::Press);   // 仅当 needs_shift(c) 为真
 ```
+
+**Windows 的三个坑（都已踩过）**：
+1. **不要用 `enigo.text(&str)`**：它走 `KEYEVENTF_UNICODE`（`wVk=0`、`wScan`=UTF-16 码元），虚拟机/远程桌面/受限窗口收不到。必须走 `key()`。
+2. **Shift 必须自己按**：`Key::Unicode(c)` 用 `VkKeyScanExW` 按**当前键盘布局**映射，且 enigo 会丢掉返回值里的 shift 状态位 → 大写与 `@#$%` 类符号会打错。因此字符映射写死 US ANSI，`needs_shift()` 为真时显式按 Shift。
+3. **`Key::Other(vk)` 的 vk 是 Win32 虚拟键码**（不是 macOS 键码）：`0x41..=0x5A` 字母、`0x30..=0x39` 数字、`0xBA..=0xBF`/`0xC0`/`0xDB..=0xDE` 标点、`0x20` 空格、`0x0D` 回车、`0x09` Tab。macOS 的 `key code` 数值不能直接搬过来。
 `enigo = "0.6"` 只在 `Cargo.toml` 的 `[target.'cfg(target_os = "windows")'.dependencies]` 下声明，macOS/Linux 不引入该依赖（保持零编译依赖）。
 
 ### Cargo.toml 依赖门控（核心，不要搞混）
@@ -164,7 +178,7 @@ cargo build --release --target x86_64-unknown-linux-musl
 ### 测试（安全）
 ```bash
 printf 'Hello World 123\n\tTab test @#$%%\n' | ./type-text -n
-cargo test --lib        # 8 个单测：三端共通 plan/analyze + macOS compile_keys/分批/键位表覆盖
+cargo test --lib        # 10 个单测：三端共通 plan/analyze/键位判定 + macOS compile_keys/分批/键位表覆盖
 ```
 - `-n` **只解析预览、不注入键盘**，是唯一的调试安全阀，CI / 本地验证都优先用它。
 - macOS 上可用 `osacompile -o /dev/null /tmp/tt_inject.applescript` 校验生成的 AppleScript 语法（注入脚本会落盘到 `/tmp/tt_inject.applescript`）。
@@ -210,7 +224,7 @@ strategy:
 2. **键位表是 US ANSI 写死的**：`macOS` 后端 `key_of()` 内置 US ANSI 键码；其他键盘布局（如 Dvorak、非美规）需要新增映射表 + 布局参数。
 3. **Linux 仅支持 X11**：Wayland 用户需要 `ydotool` 后端（可作为第四个 `#[cfg]` 变体）。
 4. **每键固定间隔**：可改为按目标响应动态退避（丢字检测 → 自动加间隔）。
-5. **osascript 副作用本身仍无法单测**：已把三端共通的「文本→键序列」抽成纯函数 `plan()`，并补了 8 个单测（统一口径、切片不拆对、不丢键、key code 不回归、全量可注入字符都有键码映射），但真实注入只能用 `-n` 或「安全替身」（把 `key code`/`delay` 剥掉后交真实 osascript 跑）验证。Linux / Windows 端在本机只能 `cargo check --target ...` 验证编译，真机行为靠 CI 构建与用户自检。
+5. **osascript 副作用本身仍无法单测**：已把三端共通的「文本→键序列」抽成纯函数 `plan()`，并补了 10 个单测（统一口径、切片不拆对、不丢键、key code 不回归、全量可注入字符都有键码映射），但真实注入只能用 `-n` 或「安全替身」（把 `key code`/`delay` 剥掉后交真实 osascript 跑）验证。Linux / Windows 端在本机只能 `cargo check --target ...` 验证编译，真机行为靠 CI 构建与用户自检。
 6. **Windows 上 Ctrl-D 需手动检测**：Windows C 运行时原生只把 Ctrl-Z 当 EOF，Ctrl-D 字节 `0x04` 会被 `read()` 作为普通字节读入。`read_text()` 已用手动 1024 字节循环 + `0x04` 位置检测解决。**不要改回 `read_to_string()` / `read_line()`，也不要改回逐块 `from_utf8_lossy`！**
 
 ---
@@ -218,7 +232,7 @@ strategy:
 ## 7. 给接手 AI 的硬规则
 
 - **不要回归到整段 `keystroke` / Unicode 字符串注入**（见第 2 节）——会毁掉虚拟机场景。
-- **macOS 注入不要改回「整段文本生成单条 AppleScript」**：单条脚本硬上限约 4039 键（`堆栈溢出 -2706`），长文本必须按 `MAX_KEYS_PER_BATCH`（≤4000）分批；改批大小前先用安全替身实测新上限。
+- **注入不要改回「整段文本生成单条 AppleScript」或 Windows 的 `enigo.text()`**：前者受单脚本约 4039 键的硬上限（`堆栈溢出 -2706`），必须按 `BATCH_KEYS`（=4000）分批；后者是 `KEYEVENTF_UNICODE` 字符注入，虚拟机收不到。改批大小前先用安全替身实测新上限。
 - **三端过滤与计数必须走 `plan()`**：不要在某个后端里自己 `keys += 1`、自己判断 `is_ascii()` 或自己收集 skipped。v0.3.0 之前 Linux / Windows 就是这样漂移出「被跳过的中文也算一个键」「跳过样本无上限刷屏」的 bug。
 - **不要给 CLI 加功能清单**：用户要的就是「启动→粘贴→等 5 秒→打字」一条路径。新增诊断开关保持 `-n`/`-p` 这种隐藏短形式。
 - **保留 `-n` 干跑**：任何改动后先 `./type-text -n` 验证解析不崩。
