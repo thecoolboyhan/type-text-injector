@@ -6,17 +6,22 @@
 
 > ⚠️ **中文 / 非 ASCII 字符会被跳过**（本工具定位英文/数字/标点）。三个平台都只做键盘模拟，不做粘贴。
 
+📖 **图文介绍**：[type-text-injector：把文本「敲」进虚拟机与远程桌面的小工具](https://thecoolboyhan.github.io/p/type-text-injector/) —— 讲清 HID 扫描码为什么是虚拟机打字的命门、三端各走哪条事件路径，以及 v0.3.0 做了哪些统一。
+
 ---
 
 ## 🖥️ 图形界面（GUI）
 
 `type-text --gui` 打开 Material 风格图形界面，同进程调用注入逻辑（不 spawn 子进程）：
 
-- 文本框输入 / 粘贴 / 📄 从文件读取
-- 🔍 预览：字符数、行数、注入键数、预计耗时、跳过字符（纯函数解析，不注入）
+- 文本框输入 / 粘贴 / 📄 从文件读取 / 🗑 清空
+- 📊 输入时实时统计：可注入键数、预计耗时、批次数、跳过字符数（与 CLI 同一口径，不用点预览）
+- 🔍 预览：字符数、行数、注入键数、预计耗时、注入批次、跳过字符（纯函数解析，不注入）
 - 倒计时 0–99 秒（0 = 立即注入）、每键间隔 1–5000ms 拖拽
+- 注入中进度条：已用时间 / 预计耗时、键数、批数
 - Pixel 风格动画：环形倒计时（末 3 秒橙→红渐变）、注入中旋转 spinner、按钮悬停反馈
 - 注入结果、跳过字符、错误提示在底部状态区（自动换行）
+- 三端界面结构 / 配色 / 字号一致，仅排错提示按平台变化；标题栏显示版本与平台
 
 ![GUI 预览](docs/gui-preview.png)
 
@@ -217,6 +222,14 @@ git push origin v0.1.0
 ```
 
 等 Actions 跑完，到 [Releases](https://github.com/thecoolboyhan/type-text-injector/releases) 即可看到 `type-text-macos` / `type-text-linux` / `type-text-windows.exe` 三个产物。
+
+---
+
+## 相关链接
+
+- 📖 图文介绍（博客）：<https://thecoolboyhan.github.io/p/type-text-injector/>
+- 源码仓库：<https://github.com/thecoolboyhan/type-text-injector>
+- 下载 Releases：<https://github.com/thecoolboyhan/type-text-injector/releases>
 
 ---
 
