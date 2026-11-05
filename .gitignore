@@ -6,3 +6,6 @@ target*
 /gui
 # 本地 Hermes 验证配方，不进仓库
 /.hermes
+# JetBrains IDE 本地配置（模块文件按机器生成，不进仓库）
+/.idea
+*.iml

@@ -1,6 +1,6 @@
 [package]
 name = "type-text-injector"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "把本机文本模拟键盘输入到当前光标处（含虚拟机/远程桌面），跨平台：macOS / Linux / Windows"
 license = "MIT"

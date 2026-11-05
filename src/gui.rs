@@ -7,7 +7,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use crate::platform;
-use crate::{analyze, Preview};
+use crate::{analyze, InjectResult, Preview};
 
 /// egui 通过 eframe 引用（eframe 依赖树中自带，不单独引 crate）
 use eframe::egui;
@@ -38,7 +38,7 @@ fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
 
 /// 后台注入线程回传的结果
 enum InjectMsg {
-    Done(Result<(usize, Vec<char>), String>),
+    Done(Result<InjectResult, String>),
 }
 
 pub fn run() {
@@ -252,13 +252,13 @@ impl GuiApp {
         if let Ok(InjectMsg::Done(r)) = self.inject_rx.try_recv() {
             self.busy = false;
             match r {
-                Ok((n, sk)) => {
-                    let mut msg = format!("✔ 完成，共输入 {} 个键。", n);
-                    if !sk.is_empty() {
+                Ok(r) => {
+                    let mut msg = format!("✔ 完成，共输入 {} 个键。", r.keys);
+                    if r.skipped_count > 0 {
                         msg.push_str(&format!(
-                            " 跳过 {} 个非英文/数字/标点字符：{}",
-                            sk.len(),
-                            sk.iter().collect::<String>()
+                            " 跳过 {} 个非英文/数字/标点字符（样本）：{}",
+                            r.skipped_count,
+                            r.skipped.iter().collect::<String>()
                         ));
                     }
                     self.set_status(&msg, false);

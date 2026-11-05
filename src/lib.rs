@@ -5,6 +5,7 @@
 //! 任何「整段 keystroke / Unicode 字符串」的简化都会让虚拟机场景崩掉（见 AGENTS.md 第 2 节）。
 
 use std::io::{self, IsTerminal, Read};
+#[cfg(not(target_os = "windows"))]
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -23,7 +24,9 @@ pub fn read_text() -> String {
         #[cfg(not(target_os = "windows"))]
         println!("请输入要输入的文本，输入完后按回车，再按 Ctrl-D 结束：");
     }
-    let mut s = String::new();
+    // 先按字节全量收齐，最后一次性解码。逐块 from_utf8_lossy 会在 UTF-8 多字节字符
+    // 跨越 1024 字节边界时把字符替换成 U+FFFD，导致长中文文本乱码、字符数虚高。
+    let mut bytes: Vec<u8> = Vec::new();
     let mut buf = [0u8; 1024];
     loop {
         match io::stdin().read(&mut buf) {
@@ -33,11 +36,11 @@ pub fn read_text() -> String {
                 {
                     // Windows 控制台可能把 Ctrl-D 作为原始字节 0x04 传入，手动识别为 EOF
                     if let Some(pos) = buf[..n].iter().position(|&b| b == 0x04) {
-                        s.push_str(&String::from_utf8_lossy(&buf[..pos]));
+                        bytes.extend_from_slice(&buf[..pos]);
                         break;
                     }
                 }
-                s.push_str(&String::from_utf8_lossy(&buf[..n]));
+                bytes.extend_from_slice(&buf[..n]);
             }
             Err(_) => {
                 eprintln!("读取输入失败");
@@ -45,8 +48,9 @@ pub fn read_text() -> String {
             }
         }
     }
+    let mut s = String::from_utf8_lossy(&bytes).into_owned();
     // 统一换行，去掉末尾多余空行
-    let mut s = s.replace("\r\n", "\n").replace('\r', "\n");
+    s = s.replace("\r\n", "\n").replace('\r', "\n");
     while s.ends_with('\n') {
         s.pop();
     }
@@ -73,44 +77,107 @@ pub fn is_injectable(c: char) -> bool {
     matches!(c, '\n' | '\r' | '\t') || c.is_ascii_graphic() || c == ' '
 }
 
-/// 预览结果：文本会被如何解析（GUI 预览弹窗与调试用，不注入）
-pub struct Preview {
-    pub chars: usize,       // 总字符数
-    pub lines: usize,       // 行数
-    pub keys: usize,        // 将注入的键数（含回车/Tab）
-    pub skipped_count: usize, // 被跳过的非 ASCII 字符总数
-    pub skipped: Vec<char>,   // 被跳过的字符样本（前 50 个）
-    pub est_secs: f64,      // 预计耗时（秒）
+/// 结尾「跳过字符」提示的样本上限。三端 inject 与 GUI 预览统一，避免长中文文本刷屏。
+pub const SKIPPED_SAMPLE_LIMIT: usize = 20;
+
+/// 统一的注入计划。**三端 inject、GUI 预览、CLI 预计耗时共用这一份口径**，
+/// 保证「哪些字符算键 / 键数统计 / 跳过样本」在任何平台都不漂移。
+pub struct InjectPlan {
+    /// 需要逐键输入的字符（已过滤非 ASCII 与不可注入字符）
+    pub keys: Vec<char>,
+    /// 被跳过的字符样本（最多 SKIPPED_SAMPLE_LIMIT 个）
+    pub skipped: Vec<char>,
+    /// 被跳过的字符总数
+    pub skipped_count: usize,
 }
 
-/// 纯函数：分析文本的注入计划。CLI 与 GUI 共用；不注入任何键盘事件，安全。
-pub fn analyze(text: &str, delay_ms: u64) -> Preview {
-    let mut keys = 0usize;
-    let mut skipped_count = 0usize;
+/// 纯函数：把文本拆成注入计划。无任何副作用，便于单测。
+pub fn plan(text: &str) -> InjectPlan {
+    let mut keys: Vec<char> = Vec::with_capacity(text.len());
     let mut skipped: Vec<char> = Vec::new();
+    let mut skipped_count = 0usize;
     for ch in text.chars() {
         if is_injectable(ch) {
-            keys += 1;
+            keys.push(ch);
         } else {
             skipped_count += 1;
-            if skipped.len() < 50 {
+            if skipped.len() < SKIPPED_SAMPLE_LIMIT {
                 skipped.push(ch);
             }
         }
     }
-    let est_secs = keys as f64 * (delay_ms as f64 + 3.0) / 1000.0;
+    InjectPlan { keys, skipped, skipped_count }
+}
+
+/// 三端 `inject()` 的统一返回结构。CLI 与 GUI 都从这里取数，
+/// 避免把「跳过样本数」误当成「跳过总数」显示。
+pub struct InjectResult {
+    /// 实际注入的键数
+    pub keys: usize,
+    /// 被跳过的字符总数
+    pub skipped_count: usize,
+    /// 被跳过的字符样本（最多 SKIPPED_SAMPLE_LIMIT 个）
+    pub skipped: Vec<char>,
+}
+
+/// 预览结果：文本会被如何解析（GUI 预览弹窗与调试用，不注入）
+pub struct Preview {
+    pub chars: usize,         // 总字符数
+    pub lines: usize,         // 行数
+    pub keys: usize,          // 将注入的键数（含回车/Tab）
+    pub skipped_count: usize, // 被跳过的非 ASCII 字符总数
+    pub skipped: Vec<char>,   // 被跳过的字符样本（最多 SKIPPED_SAMPLE_LIMIT 个）
+    pub est_secs: f64,        // 预计耗时（秒）
+}
+
+/// 纯函数：分析文本的注入计划。CLI 与 GUI 共用；不注入任何键盘事件，安全。
+pub fn analyze(text: &str, delay_ms: u64) -> Preview {
+    let p = plan(text);
     Preview {
         chars: text.chars().count(),
         lines: text.lines().count(),
-        keys,
-        skipped_count,
-        skipped,
-        est_secs,
+        keys: p.keys.len(),
+        skipped_count: p.skipped_count,
+        skipped: p.skipped,
+        est_secs: p.keys.len() as f64 * (delay_ms as f64 + 3.0) / 1000.0,
+    }
+}
+
+// ---------------------------------------------------------------- 统一口径单测（三端共通）
+#[cfg(test)]
+mod common_tests {
+    use super::*;
+
+    #[test]
+    fn plan_counts_only_injectable_chars() {
+        let p = plan("ab中文cd\ne");
+        assert_eq!(p.keys, vec!['a', 'b', 'c', 'd', '\n', 'e']);
+        assert_eq!(p.skipped_count, 2);
+        assert_eq!(p.skipped, vec!['中', '文']);
+    }
+
+    #[test]
+    fn plan_caps_skipped_samples() {
+        let p = plan(&"中".repeat(100));
+        assert!(p.keys.is_empty());
+        assert_eq!(p.skipped_count, 100);
+        assert_eq!(p.skipped.len(), SKIPPED_SAMPLE_LIMIT);
+    }
+
+    #[test]
+    fn analyze_agrees_with_plan() {
+        let text = "Hello 中文\nWorld";
+        let p = plan(text);
+        let a = analyze(text, 50);
+        assert_eq!(a.keys, p.keys.len());
+        assert_eq!(a.skipped_count, p.skipped_count);
+        assert_eq!(a.skipped, p.skipped);
+        assert!((a.est_secs - p.keys.len() as f64 * 0.053).abs() < 1e-9);
     }
 }
 
 // ---------------------------------------------------------------- 平台注入后端
-/// 各平台把文本注入到前台窗口。返回 (注入键数, 被跳过的非 ASCII 字符)。
+/// 各平台把文本注入到前台窗口，统一返回 `InjectResult`（键数 / 跳过总数 / 跳过样本）。
 /// `delay_ms` = 每键间隔毫秒；`secs` 倒计时由调用方负责（CLI 用 countdown，GUI 自绘）。
 #[cfg(target_os = "macos")]
 pub mod platform {
@@ -155,33 +222,33 @@ pub mod platform {
         })
     }
 
-    /// 把文本编译成一条 AppleScript，逐键发 key code（虚拟机场景唯一可靠的方式）。
-    pub fn inject(text: &str, delay_ms: u64) -> Result<(usize, Vec<char>), String> {
-        let mut flat: Vec<i64> = Vec::new();
-        let mut keys = 0usize;
-        let mut skipped: Vec<char> = Vec::new();
+    /// 单条 AppleScript 最多容纳的键数。
+    /// 实测 osascript 运行时 `set ks to {...}` 字面量约 8080 个数字项即报「堆栈溢出(-2706)」，
+    /// 即 4039 键；取 4000 留余量。每个键占 2 项：虚拟键码 + 是否需要 Shift。
+    /// 长文本按此大小切片，逐批生成脚本依次执行（仍然是 key code 级注入）。
+    const MAX_KEYS_PER_BATCH: usize = 4000;
 
-        for ch in text.chars() {
+    /// 纯函数：把 plan() 筛出的键编译成 [keycode, shift, ...]。
+    /// 若键位表出现映射缺口，直接报错而不是静默少打一个键（保证三端键数一致）。
+    fn compile_keys(keys: &[char]) -> Result<Vec<i64>, String> {
+        let mut flat: Vec<i64> = Vec::with_capacity(keys.len() * 2);
+        for &ch in keys {
             match key_of(ch) {
                 Some((k, s)) => {
                     flat.push(k as i64);
                     flat.push(if s { 1 } else { 0 });
-                    keys += 1;
                 }
-                None => {
-                    if skipped.len() < 20 {
-                        skipped.push(ch);
-                    }
-                }
+                None => return Err(format!("键位表缺少字符 {:?} 的 US ANSI 键码映射", ch)),
             }
         }
-        if flat.is_empty() {
-            return Err("没有可输入的内容（只支持英文/数字/标点）".into());
-        }
+        Ok(flat)
+    }
 
+    /// 把一批键序列编译成 AppleScript 源码。虚拟机只认 HID 扫描码，
+    /// 因此这里必须是 `key code N`（可带 `using shift down`），不能改回整段 keystroke。
+    fn build_script(flat: &[i64], delay_ms: u64, line_delay_ms: u64) -> String {
         let list = flat.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
-        let line_delay_ms = (delay_ms * 3).max(60);
-        let script = format!(
+        format!(
             r#"set d to {d}
 set d2 to {d2}
 set ks to {{{list}}}
@@ -204,18 +271,113 @@ end tell"#,
             d = (delay_ms as f64) / 1000.0,
             d2 = (line_delay_ms as f64) / 1000.0,
             list = list
-        );
+        )
+    }
 
-        let path = "/tmp/tt_inject.applescript";
-        std::fs::write(path, script).map_err(|e| e.to_string())?;
-        let out = Command::new("osascript")
-            .arg(path)
-            .output()
-            .map_err(|e| format!("启动 osascript 失败: {}", e))?;
-        if !out.status.success() {
-            return Err(format!("注入失败：{}", String::from_utf8_lossy(&out.stderr).trim()));
+    /// 把文本逐键注入当前前台窗口。超过 MAX_KEYS_PER_BATCH 时自动分批，
+    /// 每批生成一条独立的 AppleScript 依次执行；接口与 CLI 契约保持不变。
+    /// 返回 (总注入键数, 被跳过的非 ASCII 字符样本)。
+    pub fn inject(text: &str, delay_ms: u64) -> Result<InjectResult, String> {
+        let p = plan(text);
+        let flat = compile_keys(&p.keys)?;
+        if flat.is_empty() {
+            return Err("没有可输入的内容（只支持英文/数字/标点）".into());
         }
-        Ok((keys, skipped))
+
+        let keys = flat.len() / 2;
+        let line_delay_ms = delay_ms.saturating_mul(3).max(60);
+        let chunks: Vec<&[i64]> = flat.chunks(MAX_KEYS_PER_BATCH * 2).collect();
+        let batches = chunks.len();
+        let path = "/tmp/tt_inject.applescript";
+
+        for (idx, chunk) in chunks.iter().enumerate() {
+            if idx > 0 {
+                // 上一条 osascript 退出后给目标窗口一点缓冲，避免批次交界处丢字
+                thread::sleep(Duration::from_millis(line_delay_ms));
+            }
+            let script = build_script(chunk, delay_ms, line_delay_ms);
+            std::fs::write(path, script).map_err(|e| format!("写入注入脚本失败: {}", e))?;
+            let out = Command::new("osascript")
+                .arg(path)
+                .output()
+                .map_err(|e| format!("启动 osascript 失败: {}", e))?;
+            if !out.status.success() {
+                return Err(format!(
+                    "注入失败（第 {}/{} 批，共 {} 键）：{}",
+                    idx + 1,
+                    batches,
+                    keys,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+            }
+        }
+        Ok(InjectResult { keys, skipped_count: p.skipped_count, skipped: p.skipped })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn compile_keys_maps_ascii_and_whitespace() {
+            // A \n \t b ' ' '1' => 6 键
+            let p = plan("A\n\tb 1");
+            let flat = compile_keys(&p.keys).unwrap();
+            assert_eq!(flat.len(), 12, "每键应占 2 项");
+            assert!(p.skipped.is_empty());
+            assert_eq!(&flat[0..2], &[0, 1], "A = keycode 0 + shift");
+            assert_eq!(&flat[2..4], &[36, 0], "换行 = keycode 36");
+            assert_eq!(&flat[4..6], &[48, 0], "Tab = keycode 48");
+            assert_eq!(&flat[10..12], &[18, 0], "1 = keycode 18");
+        }
+
+        #[test]
+        fn compile_keys_skips_non_ascii_via_plan() {
+            let p = plan("ab中文cd");
+            let flat = compile_keys(&p.keys).unwrap();
+            assert_eq!(flat.len(), 8);
+            assert_eq!(p.skipped, vec!['中', '文']);
+            assert_eq!(p.skipped_count, 2);
+        }
+
+        #[test]
+        fn every_injectable_char_has_a_keycode() {
+            // plan() 认定的字符必须都能映射，否则 macOS 键数会与另外两端对不上。
+            let mut chars: Vec<char> = (0x21u8..=0x7eu8).map(|b| b as char).collect();
+            chars.extend([' ', '\t', '\r', '\n']);
+            for c in chars {
+                assert!(key_of(c).is_some(), "字符 {:?} 缺少 US ANSI 键码映射", c);
+            }
+        }
+
+        #[test]
+        fn long_text_splits_into_even_sized_batches() {
+            let text = "a".repeat(MAX_KEYS_PER_BATCH * 3 + 7);
+            let flat = compile_keys(&plan(&text).keys).unwrap();
+            let chunks: Vec<&[i64]> = flat.chunks(MAX_KEYS_PER_BATCH * 2).collect();
+            assert_eq!(chunks.len(), 4, "3 满批 + 1 尾巴");
+            let mut total = 0usize;
+            for c in &chunks {
+                assert_eq!(c.len() % 2, 0, "切片不能拆开 (keycode, shift) 对");
+                for (i, v) in c.iter().enumerate() {
+                    if i % 2 == 1 {
+                        assert!(*v == 0 || *v == 1, "奇数位只能是 shift 标志");
+                    }
+                }
+                total += c.len() / 2;
+            }
+            assert_eq!(total, text.chars().count(), "分批不能丢键");
+        }
+
+        #[test]
+        fn script_stays_keycode_based() {
+            let flat = compile_keys(&plan("Hello").keys).unwrap();
+            let s = build_script(&flat, 50, 150);
+            assert!(s.contains("key code k"), "必须保持 key code 级注入");
+            assert!(!s.contains("keystroke"), "不得回归到 Unicode 字符串注入");
+            assert!(s.contains("set ks to {"));
+            assert!(s.contains("set d to 0.05"));
+        }
     }
 
     /// 自检：分别用 Unicode 字符串注入与 keycode 注入各打一行，看虚拟机认哪种。
@@ -246,23 +408,21 @@ pub mod platform {
         }
     }
 
-    pub fn inject(text: &str, delay_ms: u64) -> Result<(usize, Vec<char>), String> {
+    pub fn inject(text: &str, delay_ms: u64) -> Result<InjectResult, String> {
         let d = delay_ms.to_string();
-        let mut keys = 0usize;
-        let mut skipped: Vec<char> = Vec::new();
-        for ch in text.chars() {
-            match ch {
-                '\n' | '\r' => xdotool(&["key", "--delay", &d, "Return"])?,
-                '\t' => xdotool(&["key", "--delay", &d, "Tab"])?,
-                c if c.is_ascii() => xdotool(&["type", "--delay", &d, &c.to_string()])?,
-                _ => skipped.push(ch),
-            }
-            keys += 1;
-        }
-        if keys == 0 {
+        let p = plan(text);
+        if p.keys.is_empty() {
             return Err("没有可输入的内容（只支持英文/数字/标点）".into());
         }
-        Ok((keys, skipped))
+        // 字符过滤由统一 plan() 负责：只有可注入字符会走到这里，键数即 p.keys.len()。
+        for ch in &p.keys {
+            match *ch {
+                '\n' | '\r' => xdotool(&["key", "--delay", &d, "Return"])?,
+                '\t' => xdotool(&["key", "--delay", &d, "Tab"])?,
+                c => xdotool(&["type", "--delay", &d, &c.to_string()])?,
+            }
+        }
+        Ok(InjectResult { keys: p.keys.len(), skipped_count: p.skipped_count, skipped: p.skipped })
     }
 
     pub fn probe(_secs: u64, _delay_ms: u64) {
@@ -279,25 +439,23 @@ pub mod platform {
     use super::*;
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 
-    pub fn inject(text: &str, delay_ms: u64) -> Result<(usize, Vec<char>), String> {
+    pub fn inject(text: &str, delay_ms: u64) -> Result<InjectResult, String> {
         let mut enigo = Enigo::new(&Settings::default()).map_err(|e| format!("初始化 enigo 失败：{:?}", e))?;
         let gap = Duration::from_millis(delay_ms);
-        let mut keys = 0usize;
-        let mut skipped: Vec<char> = Vec::new();
-        for ch in text.chars() {
-            match ch {
-                '\n' | '\r' => { let _ = enigo.key(Key::Return, Direction::Click); }
-                '\t' => { let _ = enigo.key(Key::Tab, Direction::Click); }
-                c if c.is_ascii() => { let _ = enigo.text(&c.to_string()); }
-                _ => skipped.push(ch),
-            }
-            keys += 1;
-            thread::sleep(gap);
-        }
-        if keys == 0 {
+        let p = plan(text);
+        if p.keys.is_empty() {
             return Err("没有可输入的内容（只支持英文/数字/标点）".into());
         }
-        Ok((keys, skipped))
+        // 同 Linux：字符过滤与计数统一交给 plan()。
+        for ch in &p.keys {
+            match *ch {
+                '\n' | '\r' => { let _ = enigo.key(Key::Return, Direction::Click); }
+                '\t' => { let _ = enigo.key(Key::Tab, Direction::Click); }
+                c => { let _ = enigo.text(&c.to_string()); }
+            }
+            thread::sleep(gap);
+        }
+        Ok(InjectResult { keys: p.keys.len(), skipped_count: p.skipped_count, skipped: p.skipped })
     }
 
     pub fn probe(_secs: u64, _delay_ms: u64) {

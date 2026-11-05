@@ -31,7 +31,7 @@
 | `keystroke "字符串"` / enigo `text()` | Unicode 字符串 | 拿不到扫描码 → **整串丢弃** |
 | `key code N` / enigo `key(Key, Click)` | 真实虚拟键码 | 能映射成 HID 报告 → **正常投递** |
 
-**因此**：macOS 后端**全部用 `key code N`**（真实虚拟键码 + Shift 标志），这是它能稳定打进 Parallels / VMware 的原因。Linux / Windows 走各自平台的原生键事件（xdotool / Win32 SendInput），同样可靠。
+**因此**：macOS 后端**全部用 `key code N`**（真实虚拟键码 + Shift 标志），这是它能稳定打进 Parallels / VMware 的原因。Linux（`xdotool type`）/ Windows（enigo `text()`）走的是**逐字符文本事件**，并非 keycode；本项目只对 macOS 的虚拟机场景做过实测，另外两端不要套用「同样可靠」的结论，使用前请先用 `-p` 自检。
 
 > ⚠️ 任何「改回整段 `keystroke`」的"简化"都会让虚拟机场景重新崩掉。这是本项目存在的全部理由，不要回归。
 
@@ -58,14 +58,15 @@ type-text-injector/
 ```
 
 ### `src/lib.rs` 结构
-- `read_text()`：手动 1024 字节循环读 stdin → 统一 CRLF/CR→LF → trim 末尾空行。
+- `read_text()`：手动 1024 字节循环读 stdin → **全量收齐字节后一次性 UTF-8 解码**（逐块 `from_utf8_lossy` 会把跨块中文切成 U+FFFD、字符数虚高）→ 统一 CRLF/CR→LF → trim 末尾空行。
   - **Windows 特殊处理**：显式检测字节 `0x04`（Ctrl-D）作为 EOF（Windows C 运行时原生只认 Ctrl-Z `0x1A`）。
   - 交互终端下打印提示（Windows 提示"Ctrl-Z（或 Ctrl-D）"，其他平台仅"Ctrl-D"）。
 - `countdown(secs)`：逐秒倒计时，提示用户把光标点到目标窗口。`secs == 0` 立即返回。
-- `is_injectable(c)` / `analyze(text, delay_ms)`：纯函数，分析文本注入计划（不注入），GUI 预览与 CLI 共用。
+- `is_injectable(c)` / `plan(text)` / `analyze(text, delay_ms)`：纯函数。**`plan()` 是三端唯一的口径来源**（哪些字符算键、键数、跳过样本 `SKIPPED_SAMPLE_LIMIT = 20`）；三端 `inject()`、GUI 预览、CLI 预计耗时全部基于它，`analyze()` 只是把 plan 包装成预览结果。
 - `mod platform`：**用 `#[cfg(target_os = "...")]` 编译期分三个后端**，每个暴露统一接口：
-  - `inject(text: &str, delay_ms: u64) -> Result<(usize, Vec<char>), String>`：返回 `(注入键数, 被跳过的非 ASCII 字符)`。
+  - `inject(text: &str, delay_ms: u64) -> Result<InjectResult, String>`：`InjectResult { keys, skipped_count, skipped }` = 键数 / 跳过总数 / 跳过样本。三端签名一致，CLI 与 GUI 共用；不要在显示层把 `skipped.len()` 当成总数。
   - `probe(secs, delay_ms)`：自检，打一行标记确认注入生效。
+- **macOS 后端的长文本分批（v0.3.0 起）**：`const MAX_KEYS_PER_BATCH = 4000`。单条 AppleScript 的 `set ks to {...}` 字面量约 8080 个数字项（=4039 键）就会 `堆栈溢出 (-2706)`，这是运行时的项数上限、与字符内容无关。`inject()` 先用纯函数 `compile_keys()`（基于 `plan()`；键位表缺映射时直接报错，不静默少打键）把文本编译成 `[keycode, shift, ...]` 扁平序列，再按 4000 键切片，每片由 `build_script()` 生成一条独立脚本依次 `osascript` 执行；批间 sleep `max(delay×3, 60)`ms 防止交界处丢字。共 8 个单测（4 个三端共通 + 4 个 macOS 专属，含「全部可注入字符都有键码映射」）。**不要改回单条脚本。**
 - `mod gui`：**用 `#[cfg(not(target_env = "musl"))]` 门控**，非 musl 构建（macOS / Linux / Windows）自动包含 GUI。
 
 ### `src/main.rs` 结构（仅 CLI 入口，约 106 行）
@@ -83,6 +84,8 @@ type-text-injector/
 | macOS | `osascript` 生成一条 AppleScript，循环 `key code N`（含 `using shift down`），回车=`key code 36` | 系统自带；需「辅助功能」授权终端 |
 | Linux | `xdotool type --delay N <char>` / `xdotool key --delay N Return\|Tab` | 需装 `xdotool`，且为 X11 会话（Wayland 暂不支持） |
 | Windows | `enigo 0.6`：`Enigo::new(&Settings::default())` + `Keyboard::text(&str)` / `key(Key::Return, Direction::Click)` | 编译期自动拉取，无需用户额外依赖 |
+
+> 只有 macOS 后端是 `key code` 虚拟键码级；Linux / Windows 是逐字符文本事件。但三者**共用 `plan()` 的字符过滤、键数统计与跳过样本上限**，这是 v0.3.0 修齐的部分。
 
 **Windows 专属细节（enigo 0.6 正确 API）**：
 ```rust
@@ -161,6 +164,7 @@ cargo build --release --target x86_64-unknown-linux-musl
 ### 测试（安全）
 ```bash
 printf 'Hello World 123\n\tTab test @#$%%\n' | ./type-text -n
+cargo test --lib        # 8 个单测：三端共通 plan/analyze + macOS compile_keys/分批/键位表覆盖
 ```
 - `-n` **只解析预览、不注入键盘**，是唯一的调试安全阀，CI / 本地验证都优先用它。
 - macOS 上可用 `osacompile -o /dev/null /tmp/tt_inject.applescript` 校验生成的 AppleScript 语法（注入脚本会落盘到 `/tmp/tt_inject.applescript`）。
@@ -206,14 +210,16 @@ strategy:
 2. **键位表是 US ANSI 写死的**：`macOS` 后端 `key_of()` 内置 US ANSI 键码；其他键盘布局（如 Dvorak、非美规）需要新增映射表 + 布局参数。
 3. **Linux 仅支持 X11**：Wayland 用户需要 `ydotool` 后端（可作为第四个 `#[cfg]` 变体）。
 4. **每键固定间隔**：可改为按目标响应动态退避（丢字检测 → 自动加间隔）。
-5. **无单测 / 集成测试**：`inject` 纯副作用（敲键盘），难单测；可考虑把「文本→键序列」的映射逻辑抽成纯函数，单独单测（这是最有价值的重构点）。
-6. **Windows 上 Ctrl-D 需手动检测**：Windows C 运行时原生只把 Ctrl-Z 当 EOF，Ctrl-D 字节 `0x04` 会被 `read()` 作为普通字节读入。`read_text()` 已用手动 1024 字节循环 + `0x04` 位置检测解决。**不要改回 `read_to_string()` / `read_line()`！**
+5. **osascript 副作用本身仍无法单测**：已把三端共通的「文本→键序列」抽成纯函数 `plan()`，并补了 8 个单测（统一口径、切片不拆对、不丢键、key code 不回归、全量可注入字符都有键码映射），但真实注入只能用 `-n` 或「安全替身」（把 `key code`/`delay` 剥掉后交真实 osascript 跑）验证。Linux / Windows 端在本机只能 `cargo check --target ...` 验证编译，真机行为靠 CI 构建与用户自检。
+6. **Windows 上 Ctrl-D 需手动检测**：Windows C 运行时原生只把 Ctrl-Z 当 EOF，Ctrl-D 字节 `0x04` 会被 `read()` 作为普通字节读入。`read_text()` 已用手动 1024 字节循环 + `0x04` 位置检测解决。**不要改回 `read_to_string()` / `read_line()`，也不要改回逐块 `from_utf8_lossy`！**
 
 ---
 
 ## 7. 给接手 AI 的硬规则
 
 - **不要回归到整段 `keystroke` / Unicode 字符串注入**（见第 2 节）——会毁掉虚拟机场景。
+- **macOS 注入不要改回「整段文本生成单条 AppleScript」**：单条脚本硬上限约 4039 键（`堆栈溢出 -2706`），长文本必须按 `MAX_KEYS_PER_BATCH`（≤4000）分批；改批大小前先用安全替身实测新上限。
+- **三端过滤与计数必须走 `plan()`**：不要在某个后端里自己 `keys += 1`、自己判断 `is_ascii()` 或自己收集 skipped。v0.3.0 之前 Linux / Windows 就是这样漂移出「被跳过的中文也算一个键」「跳过样本无上限刷屏」的 bug。
 - **不要给 CLI 加功能清单**：用户要的就是「启动→粘贴→等 5 秒→打字」一条路径。新增诊断开关保持 `-n`/`-p` 这种隐藏短形式。
 - **保留 `-n` 干跑**：任何改动后先 `./type-text -n` 验证解析不崩。
 - **改了 `release.yml` 想重跑**：删旧 tag 重打即可（首次发布无 Release 产物时安全）；不要为了文档改动而盲目发新版本号。

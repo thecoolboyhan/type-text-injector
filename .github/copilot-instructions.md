@@ -13,7 +13,7 @@
 
 ## 硬性约束（不要违反）
 
-1. 往虚拟机打字必须用 **keycode 级注入**（`key code N` / enigo `key()`），**禁止回归**到整段 `keystroke` / Unicode 字符串注入——否则虚拟机场景崩掉。
+1. macOS 后端必须用 **keycode 级注入**（`key code N`），**禁止回归**到整段 `keystroke`——否则虚拟机场景崩掉。Linux（`xdotool type`）/ Windows（enigo `text()`）是逐字符文本事件，虚拟机可靠性未经本项目实测。
 2. CI 矩阵必须用 `os: [...]` + `include` 写法，不要用 list-of-maps。
 3. 单条命令、零交互主流程：`启动 → 读文本 → 倒计时 → 逐键注入`。不要给 CLI 加功能清单。
 4. 始终保留 `-n`（干跑预览，不注入）作为调试安全阀。

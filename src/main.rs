@@ -14,7 +14,7 @@
 //! 编译：cargo build --release    （产物 target/release/type-text）
 
 use std::env;
-use type_text_injector::{countdown, platform, read_text};
+use type_text_injector::{analyze, countdown, platform, read_text};
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -67,13 +67,15 @@ fn main() {
         eprintln!("没有输入任何内容。");
         std::process::exit(1);
     }
-    let est = text.chars().count() as f64 * (delay_ms as f64 + 3.0) / 1000.0;
+    // 预计耗时统一走 analyze()（与 GUI 预览、三端 inject 同一套键数口径），
+    // 避免把被跳过的非 ASCII 字符也算进耗时。
+    let preview = analyze(&text, delay_ms);
     println!(
         "已收到 {} 行 / {} 字符，每键间隔 {}ms，预计耗时约 {:.0} 秒；{} 秒后开始输入。",
-        text.lines().count(),
-        text.chars().count(),
+        preview.lines,
+        preview.chars,
         delay_ms,
-        est,
+        preview.est_secs,
         secs
     );
 
@@ -88,13 +90,13 @@ fn main() {
     countdown(secs);
 
     match platform::inject(&text, delay_ms) {
-        Ok((n, sk)) => {
-            println!("完成，共输入 {} 个键。", n);
-            if !sk.is_empty() {
+        Ok(r) => {
+            println!("完成，共输入 {} 个键。", r.keys);
+            if r.skipped_count > 0 {
                 eprintln!(
-                    "跳过 {} 个非英文/数字/标点字符：{}",
-                    sk.len(),
-                    sk.iter().collect::<String>()
+                    "跳过 {} 个非英文/数字/标点字符（样本）：{}",
+                    r.skipped_count,
+                    r.skipped.iter().collect::<String>()
                 );
             }
         }
